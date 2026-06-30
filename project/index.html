@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ABB Ability™ - Ship Delivery Intelligence (SDI) 통합 대시보드</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap');
+        body { font-family: 'Inter', 'Noto Sans KR', sans-serif; }
+        [x-cloak] { display: none !important; }
+        .animate-scaleUp { animation: scaleUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        @keyframes scaleUp { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        pre { white-space: pre-wrap; word-break: break-word; }
+    </style>
+    <script>
+        const collectorChannels = [
+            { id: 'bid', name: '조달청 나라장터 입찰공고정보서비스', targetUrl: 'http://apis.data.go.kr/1230000/ad/BidPublicInfoService', method: 'REST OpenAPI', frequency: '수동 실행', status: 'ACTIVE' },
+            { id: 'contract', name: '조달청 나라장터 계약정보서비스', targetUrl: 'http://apis.data.go.kr/1230000/ao/CntrctInfoService', method: 'REST OpenAPI', frequency: '수동 실행', status: 'ACTIVE' },
+            { id: 'award', name: '조달청 나라장터 낙찰정보서비스', targetUrl: 'http://apis.data.go.kr/1230000/as/ScsbidInfoService', method: 'REST OpenAPI', frequency: '수동 실행', status: 'ACTIVE' },
+            { id: 'order_plan', name: '조달청 나라장터 발주계획현황서비스', targetUrl: 'http://apis.data.go.kr/1230000/ao/OrderPlanSttusService', method: 'REST OpenAPI', frequency: '수동 실행', status: 'ACTIVE' },
+            { id: 'prespec', name: '조달청 나라장터 사전규격정보서비스', targetUrl: 'http://apis.data.go.kr/1230000/ao/HrcspSsstndrdInfoService', method: 'REST OpenAPI', frequency: '수동 실행', status: 'ACTIVE' },
+            { id: 'public_data', name: '조달청 나라장터 공공데이터개방표준서비스', targetUrl: 'http://apis.data.go.kr/1230000/ao/PubDataOpnStdService', method: 'REST OpenAPI', frequency: '수동 실행', status: 'ACTIVE' },
+            { id: 'ship_support', name: '해양수산부 선박제원정보 서비스', targetUrl: 'http://apis.data.go.kr/1192000/SicsVsslManp3/Info3', method: 'REST OpenAPI(XML)', frequency: '수동 실행', status: 'ACTIVE' },
+            { id: 'ship_operation', name: '해양수산부 선박운항정보 서비스', targetUrl: 'http://apis.data.go.kr/1192000/VsslEtrynd5/Info5', method: 'REST OpenAPI(XML)', frequency: '수동 실행', status: 'ACTIVE' },
+            { id: 'user_info', name: '조달청 나라장터 사용자정보서비스', targetUrl: 'http://apis.data.go.kr/1230000/ao/UsrInfoService02', method: 'REST OpenAPI', frequency: '원시 호출 지원', status: 'ACTIVE' },
+            { id: 'incheon_port', name: '인천항만 Open API', targetUrl: '-', method: '보류', frequency: '보류', status: 'PAUSED' }
+        ];
+
+        function calcOrderWindow(deliveryDateStr) {
+            if (!deliveryDateStr) return { deadlineDateStr: '-', monthsLeft: 0, isOverdue: false, isUrgent: false };
+            const currentDate = new Date();
+            const deliveryDate = new Date(deliveryDateStr);
+            if (Number.isNaN(deliveryDate.getTime())) return { deadlineDateStr: '-', monthsLeft: 0, isOverdue: false, isUrgent: false };
+            const orderDeadline = new Date(deliveryDate);
+            orderDeadline.setMonth(orderDeadline.getMonth() - 4);
+            const diffDays = Math.ceil((orderDeadline - currentDate) / (1000 * 60 * 60 * 24));
+            const diffMonths = parseFloat((diffDays / 30.4).toFixed(1));
+            return {
+                deadlineDateStr: orderDeadline.toISOString().split('T')[0],
+                monthsLeft: diffMonths,
+                isOverdue: diffMonths <= 0,
+                isUrgent: diffMonths > 0 && diffMonths <= 3
+            };
+        }
+
+        function sdiApp() {
+            return {
+                projects: [],
+                channels: collectorChannels,
+                searchTerm: '',
+                filterSourceType: 'ALL',
+                filterStatus: 'ALL',
+                filterDriveStatus: 'ALL',
+                selectedProject: null,
+                deliverySortOrder: 'NONE',
+                valueSortOrder: 'NONE',
+                viewMode: 'grid',
+                isThinking: false,
+                thinkingStep: 0,
+                thinkingLogs: [],
+                toastMessage: null,
+                isLoading: true,
+                lastCollectedAt: null,
+
+                async init() {
+                    await this.fetchLatestProjects();
+                    this.$nextTick(() => lucide.createIcons());
+                },
+
+                triggerToast(msg) {
+                    this.toastMessage = msg;
+                    this.$nextTick(() => lucide.createIcons());
+                    setTimeout(() => { this.toastMessage = null; }, 3000);
+                },
+
+                formatBudget(project) {
+                    const raw = project.orderValue;
+                    if (raw === null || raw === undefined || raw === '') return '-';
+                    const num = Number(String(raw).replace(/[^0-9.-]/g, ''));
+                    if (Number.isNaN(num)) return String(raw);
+                    return (project.currency || 'KRW') === 'KRW' ? '₩ ' + num.toLocaleString('ko-KR') : (project.currency || 'USD') + ' ' + num.toLocaleString('en-US');
+                },
+
+                formattedRaw(project) {
+                    return JSON.stringify(project.rawPayload || {}, null, 2);
+                },
+
+                calculateOrderWindow(deliveryDateStr) {
+                    return calcOrderWindow(deliveryDateStr);
+                },
+
+                async fetchLatestProjects() {
+                    this.isLoading = true;
+                    try {
+                        const response = await fetch('/api/projects');
+                        if (!response.ok) throw new Error('프로젝트 조회 실패');
+                        const data = await response.json();
+                        this.projects = Array.isArray(data.projects) ? data.projects : [];
+                        this.lastCollectedAt = data.lastCollectedAt || null;
+                    } catch (error) {
+                        console.error(error);
+                        this.projects = [];
+                        this.triggerToast('프로젝트를 불러오지 못했습니다.');
+                    } finally {
+                        this.isLoading = false;
+                        this.$nextTick(() => lucide.createIcons());
+                    }
+                },
+
+                async runAiThinking() {
+                    this.isThinking = true;
+                    this.thinkingStep = 0;
+                    this.thinkingLogs = [];
+                    const steps = [
+                        '나라장터 입찰공고 수집 중...',
+                        '계약 / 낙찰 / 발주계획 / 사전규격 수집 중...',
+                        '공공데이터개방표준 / 선박제원 / 선박운항 수집 중...',
+                        '중복 제거 및 DB 저장 중...',
+                        '프론트엔드 재조회 중...'
+                    ];
+                    const timer = setInterval(() => {
+                        if (this.thinkingStep < steps.length) {
+                            this.thinkingLogs.push(steps[this.thinkingStep]);
+                            this.thinkingStep += 1;
+                        }
+                    }, 500);
+                    try {
+                        const response = await fetch('/api/collect', { method: 'POST' });
+                        const data = await response.json();
+                        clearInterval(timer);
+                        this.thinkingLogs = steps;
+                        this.thinkingStep = steps.length;
+                        await this.fetchLatestProjects();
+                        this.triggerToast(data.message || '수집이 완료되었습니다.');
+                    } catch (error) {
+                        clearInterval(timer);
+                        console.error(error);
+                        this.triggerToast('수집 중 오류가 발생했습니다.');
+                    } finally {
+                        this.isThinking = false;
+                        this.$nextTick(() => lucide.createIcons());
+                    }
+                },
+
+                async runSingleCollector(channel) {
+                    if (channel.id === 'incheon_port') {
+                        this.triggerToast('인천항만 Collector는 보류 상태입니다.');
+                        return;
+                    }
+                    try {
+                        const response = await fetch(`/api/collect/${channel.id}`, { method: 'POST' });
+                        const data = await response.json();
+                        await this.fetchLatestProjects();
+                        this.triggerToast(data.message || `${channel.name} 실행 완료`);
+                    } catch (error) {
+                        console.error(error);
+                        this.triggerToast(`${channel.name} 실행 실패`);
+                    }
+                },
+
+                toggleSort(sortType) {
+                    if (sortType === 'delivery') {
+                        this.valueSortOrder = 'NONE';
+                        this.deliverySortOrder = this.deliverySortOrder === 'NONE' ? 'ASC' : (this.deliverySortOrder === 'ASC' ? 'DESC' : 'NONE');
+                    }
+                    if (sortType === 'value') {
+                        this.deliverySortOrder = 'NONE';
+                        this.valueSortOrder = this.valueSortOrder === 'NONE' ? 'DESC' : (this.valueSortOrder === 'DESC' ? 'ASC' : 'NONE');
+                    }
+                },
+
+                filteredAndSortedProjects() {
+                    let filtered = this.projects.filter((p) => {
+                        const text = [
+                            p.name, p.company, p.announcementNo, p.projectNo, p.contractNo, p.region,
+                            p.keywordText, p.registeredAt, p.orderValue, (p.matchedKeywords || []).join(' ')
+                        ].join(' ').toLowerCase();
+                        const matchesSearch = text.includes(this.searchTerm.toLowerCase());
+                        const matchesSource = this.filterSourceType === 'ALL' || p.sourceType === this.filterSourceType;
+                        const matchesStatus = this.filterStatus === 'ALL' || p.verificationStatus === this.filterStatus;
+                        const orderState = calcOrderWindow(p.deliveryDate);
+                        const matchesDrive = this.filterDriveStatus === 'ALL'
+                            || (this.filterDriveStatus === 'OVERDUE' && orderState.isOverdue)
+                            || (this.filterDriveStatus === 'URGENT' && orderState.isUrgent)
+                            || (this.filterDriveStatus === 'SAFE' && !orderState.isOverdue && !orderState.isUrgent);
+                        return matchesSearch && matchesSource && matchesStatus && matchesDrive;
+                    });
+
+                    if (this.deliverySortOrder !== 'NONE') {
+                        filtered = filtered.sort((a, b) => {
+                            const aDate = a.deliveryDate ? new Date(a.deliveryDate).getTime() : 0;
+                            const bDate = b.deliveryDate ? new Date(b.deliveryDate).getTime() : 0;
+                            return this.deliverySortOrder === 'ASC' ? aDate - bDate : bDate - aDate;
+                        });
+                    }
+
+                    if (this.valueSortOrder !== 'NONE') {
+                        filtered = filtered.sort((a, b) => {
+                            const aVal = Number(String(a.orderValue || '0').replace(/[^0-9.-]/g, '')) || 0;
+                            const bVal = Number(String(b.orderValue || '0').replace(/[^0-9.-]/g, '')) || 0;
+                            return this.valueSortOrder === 'ASC' ? aVal - bVal : bVal - aVal;
+                        });
+                    }
+                    return filtered;
+                }
+            };
+        }
+    </script>
+</head>
+<body class="bg-[#F8F9FA] text-[#222222] min-h-screen flex flex-col" x-data="sdiApp()" x-init="init()">
+    <div x-show="toastMessage" x-transition class="fixed top-5 right-5 z-50 bg-[#232323] text-white px-5 py-3 rounded-xl shadow-xl border border-slate-700/50 flex items-center gap-2" style="display:none;">
+        <i data-lucide="check-circle-2" class="text-emerald-400 w-5 h-5"></i>
+        <span class="text-sm font-semibold" x-text="toastMessage"></span>
+    </div>
+
+    <header class="sticky top-0 z-30 bg-[#232323] text-white border-b-4 border-[#E0001A] px-6 py-4 flex items-center justify-between shadow-md">
+        <div class="flex items-center gap-3">
+            <div class="bg-[#E0001A] text-white p-2.5 rounded shadow-md">
+                <i data-lucide="cpu" class="animate-pulse w-6 h-6"></i>
+            </div>
+            <div>
+                <span class="text-[10px] uppercase tracking-wider font-extrabold text-[#E0001A] block">ABB Ability™ [SECURE NETWORK ACTIVE]</span>
+                <h1 class="text-lg font-extrabold tracking-tight">Ship Delivery Intelligence (SDI)</h1>
+            </div>
+        </div>
+        <button @click="runAiThinking()" :disabled="isThinking" class="flex items-center gap-2 px-5 py-2.5 bg-[#E0001A] hover:bg-[#C00016] disabled:bg-gray-600 text-white text-sm font-bold rounded shadow transition duration-200">
+            <i data-lucide="zap" class="w-4 h-4"></i>
+            <span x-text="isThinking ? '데이터 수집 및 검증 중...' : '오늘 데이터 수집 및 검증'"></span>
+        </button>
+    </header>
+
+    <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div class="bg-white rounded-xl border border-gray-200/80 p-5 shadow-sm border-l-4 border-slate-700">
+                <div class="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">전체 관리 프로젝트</div>
+                <div class="text-2xl font-black text-slate-800 mt-1" x-text="projects.length + '건'"></div>
+                <div class="text-[10px] text-slate-500 font-semibold mt-1">실제 API 수집 데이터 기준</div>
+            </div>
+            <div class="bg-white rounded-xl border border-gray-200/80 p-5 shadow-sm border-l-4 border-[#E0001A]">
+                <div class="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">드라이브 기한 초과</div>
+                <div class="text-2xl font-black text-[#E0001A] mt-1" x-text="projects.filter(p => calculateOrderWindow(p.deliveryDate).isOverdue).length + '건'"></div>
+                <div class="text-[10px] text-rose-500 font-semibold mt-1">납기 정보가 있는 실제 데이터만 계산</div>
+            </div>
+            <div class="bg-white rounded-xl border border-gray-200/80 p-5 shadow-sm border-l-4 border-amber-500">
+                <div class="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">주문 임박 (3개월 내)</div>
+                <div class="text-2xl font-black text-amber-500 mt-1" x-text="projects.filter(p => calculateOrderWindow(p.deliveryDate).isUrgent).length + '건'"></div>
+                <div class="text-[10px] text-amber-500 font-semibold mt-1">납기 정보가 있는 실제 데이터만 계산</div>
+            </div>
+            <div class="bg-white rounded-xl border border-gray-200/80 p-5 shadow-sm border-l-4 border-emerald-500">
+                <div class="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">액티브 수집 채널 가동률</div>
+                <div class="text-2xl font-black text-emerald-600 mt-1"><span x-text="channels.filter(c => c.status === 'ACTIVE').length"></span> / <span x-text="channels.length"></span></div>
+                <div class="text-[10px] text-emerald-500 font-semibold mt-1" x-text="lastCollectedAt ? '최근 갱신: ' + lastCollectedAt : '아직 수집 기록 없음'"></div>
+            </div>
+        </div>
+
+        <div class="bg-red-50 border-l-4 border-[#E0001A] rounded-r-xl p-4 flex items-start gap-3">
+            <i data-lucide="alert-circle" class="text-[#E0001A] shrink-0 mt-0.5 w-5 h-5"></i>
+            <div class="text-xs text-slate-800 leading-relaxed">
+                <span class="font-bold text-[#E0001A]">자동 키워드 필터 기준:</span>
+                선박, 조선, 조선소, 해양, 해군, LNG, LPG, FPSO, Offshore, Marine, Ship, Shipbuilding, Dock, Dry Dock, 엔진, 펌프, 밸브, 배관, 용접, 블록, 기자재, 프로펠러, 전장, 기관
+            </div>
+        </div>
+
+        <div x-show="isThinking" class="bg-[#232323] text-slate-200 rounded-xl border border-slate-800 p-6 shadow-xl space-y-4" style="display:none;">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div class="flex items-center gap-2">
+                    <i data-lucide="cpu" class="text-[#E0001A] animate-spin w-5 h-5"></i>
+                    <h3 class="text-sm font-semibold text-slate-100">Collector Pipeline 실행 중</h3>
+                </div>
+                <span class="text-xs text-[#E0001A] font-mono font-semibold">Step <span x-text="thinkingStep"></span>/5</span>
+            </div>
+            <div class="space-y-2 font-mono text-xs">
+                <template x-for="(log, index) in thinkingLogs" :key="index">
+                    <div class="flex items-start gap-2 text-slate-300"><span class="text-[#E0001A]">✓</span><span x-text="log"></span></div>
+                </template>
+                <div class="h-2 w-full bg-slate-800 rounded-full overflow-hidden mt-3">
+                    <div class="h-full bg-[#E0001A] transition-all duration-500" :style="'width: ' + ((thinkingStep/5)*100) + '%'"}></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div class="lg:col-span-4 space-y-6">
+                <div class="bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-4">
+                    <div class="flex items-center justify-between border-b border-slate-100 pb-3">
+                        <h2 class="text-sm font-bold text-slate-800 flex items-center gap-1.5"><i data-lucide="globe" class="text-[#E0001A] w-4.5 h-4.5"></i> 실시간 수집 채널 컨트롤러</h2>
+                        <span class="text-[10px] text-white bg-[#E0001A] px-2.5 py-0.5 rounded font-bold">LIVE</span>
+                    </div>
+                    <div class="space-y-3">
+                        <template x-for="ch in channels" :key="ch.id">
+                            <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2 hover:border-[#E0001A]/30 transition duration-200">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-bold text-slate-800" x-text="ch.name"></span>
+                                    <div class="flex items-center gap-1.5">
+                                        <span class="relative inline-flex rounded-full h-2 w-2" :class="ch.status === 'ACTIVE' ? 'bg-[#E0001A]' : 'bg-slate-400'"></span>
+                                        <span class="text-[10px] font-bold text-slate-500" x-text="ch.status"></span>
+                                    </div>
+                                </div>
+                                <div class="text-[10px] text-slate-400 space-y-0.5">
+                                    <div class="truncate"><strong class="font-semibold text-slate-500">타깃 URL:</strong> <span x-text="ch.targetUrl"></span></div>
+                                    <div><strong class="font-semibold text-slate-500">수집 방식:</strong> <span x-text="ch.method"></span></div>
+                                    <div><strong class="font-semibold text-slate-500">주기:</strong> <span x-text="ch.frequency"></span></div>
+                                </div>
+                                <button @click="runSingleCollector(ch)" class="w-full mt-1.5 py-1.5 border border-slate-200 hover:border-[#E0001A] hover:bg-red-50 text-slate-700 hover:text-[#E0001A] rounded text-[10px] font-bold transition duration-200">해당 채널 즉시 실행</button>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </div>
+
+            <div class="lg:col-span-8 space-y-6">
+                <div class="bg-white rounded-xl border border-gray-200 p-5 shadow-sm space-y-4">
+                    <div class="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center">
+                        <div class="relative lg:col-span-3">
+                            <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4"></i>
+                            <input type="text" placeholder="프로젝트명, 기관명, 공고번호, 키워드, 지역, 예산, 등록일 검색..." x-model="searchTerm" class="w-full pl-9 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-[#E0001A] focus:bg-white transition" />
+                        </div>
+                        <div class="flex rounded bg-slate-100 p-1 lg:col-span-3">
+                            <button @click="filterSourceType = 'ALL'" :class="filterSourceType === 'ALL' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">전체</button>
+                            <button @click="filterSourceType = 'G2B'" :class="filterSourceType === 'G2B' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">G2B</button>
+                            <button @click="filterSourceType = 'PUBLIC_STD'" :class="filterSourceType === 'PUBLIC_STD' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">표준</button>
+                            <button @click="filterSourceType = 'SHIP'" :class="filterSourceType === 'SHIP' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">선박</button>
+                        </div>
+                        <div class="flex rounded bg-slate-100 p-1 lg:col-span-3">
+                            <button @click="filterDriveStatus = 'ALL'" :class="filterDriveStatus === 'ALL' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">전체오더</button>
+                            <button @click="filterDriveStatus = 'OVERDUE'" :class="filterDriveStatus === 'OVERDUE' ? 'bg-[#E0001A] text-white shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">Overdue</button>
+                            <button @click="filterDriveStatus = 'URGENT'" :class="filterDriveStatus === 'URGENT' ? 'bg-amber-500 text-white shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">Urgent</button>
+                            <button @click="filterDriveStatus = 'SAFE'" :class="filterDriveStatus === 'SAFE' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">Safe</button>
+                        </div>
+                        <div class="flex rounded border border-gray-200 p-0.5 lg:col-span-3 justify-between items-center bg-white">
+                            <button @click="viewMode = 'grid'" :class="viewMode === 'grid' ? 'bg-slate-800 text-white' : 'text-slate-500'" class="flex-1 flex justify-center py-1 rounded text-xs font-bold transition"><i data-lucide="layout-grid" class="w-3.5 h-3.5 mr-1"></i> 그리드</button>
+                            <button @click="viewMode = 'table'" :class="viewMode === 'table' ? 'bg-slate-800 text-white' : 'text-slate-500'" class="flex-1 flex justify-center py-1 rounded text-xs font-bold transition"><i data-lucide="sliders" class="w-3.5 h-3.5 mr-1"></i> 테이블</button>
+                        </div>
+                    </div>
+                    <div class="pt-3 border-t border-slate-100 flex flex-wrap gap-2 items-center text-xs">
+                        <span class="text-slate-400 font-bold">정렬 기준:</span>
+                        <button @click="toggleSort('delivery')" class="px-2.5 py-1 rounded border flex items-center gap-1 transition" :class="deliverySortOrder !== 'NONE' ? 'bg-[#E0001A] text-white border-[#E0001A]' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"><span>선박 납기일</span><span x-text="deliverySortOrder === 'NONE' ? '↕' : (deliverySortOrder === 'ASC' ? '▲' : '▼')"></span></button>
+                        <button @click="toggleSort('value')" class="px-2.5 py-1 rounded border flex items-center gap-1 transition" :class="valueSortOrder !== 'NONE' ? 'bg-[#E0001A] text-white border-[#E0001A]' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"><span>계약 예산액</span><span x-text="valueSortOrder === 'NONE' ? '↕' : (valueSortOrder === 'ASC' ? '▲' : '▼')"></span></button>
+                    </div>
+                </div>
+
+                <template x-if="isLoading">
+                    <div class="bg-white rounded-xl border border-gray-200 p-10 text-center text-slate-500 text-sm shadow-sm">로딩 중...</div>
+                </template>
+
+                <template x-if="!isLoading && filteredAndSortedProjects().length === 0">
+                    <div class="bg-white rounded-xl border border-gray-200 p-10 text-center shadow-sm">
+                        <div class="text-slate-700 font-bold text-lg">현재 수집된 프로젝트가 없습니다.</div>
+                        <div class="text-slate-500 text-sm mt-2">상단의 갱신 버튼으로 실제 API 데이터를 수집하세요.</div>
+                    </div>
+                </template>
+
+                <div x-show="!isLoading && filteredAndSortedProjects().length > 0 && viewMode === 'grid'" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <template x-for="project in filteredAndSortedProjects()" :key="project.id">
+                        <div @click="selectedProject = project; $nextTick(() => lucide.createIcons())" class="bg-white rounded-xl border hover:shadow-lg transition-all duration-300 cursor-pointer p-5 flex flex-col justify-between group relative overflow-hidden" :class="calculateOrderWindow(project.deliveryDate).isOverdue ? 'border-rose-300 shadow-rose-50/50 hover:border-[#E0001A]' : 'border-slate-200 hover:border-slate-800'">
+                            <div class="space-y-3.5">
+                                <div class="flex items-center justify-between gap-2">
+                                    <span class="text-[9px] font-bold px-2 py-0.5 rounded uppercase tracking-wider" :class="project.sourceType === 'G2B' ? 'bg-amber-100 text-amber-800' : (project.sourceType === 'PUBLIC_STD' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800')" x-text="project.sourceService"></span>
+                                    <span class="text-[9px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200" x-text="project.verificationStatus"></span>
+                                </div>
+                                <div>
+                                    <h3 class="font-bold text-slate-800 text-sm leading-snug group-hover:text-[#E0001A] transition" x-text="project.name"></h3>
+                                    <div class="flex flex-wrap gap-1.5 mt-2">
+                                        <span class="text-[9px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-semibold font-mono">공고 <span x-text="project.announcementNo || '-'"></span></span>
+                                        <span class="text-[9px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-semibold">기관 <span x-text="project.company || '-'"></span></span>
+                                        <span class="text-[9px] bg-red-50 text-[#E0001A] px-1.5 py-0.5 rounded font-semibold">지역 <span x-text="project.region || '-'"></span></span>
+                                    </div>
+                                </div>
+                                <div class="bg-slate-50 border border-slate-100 text-slate-800 p-3 rounded-xl flex flex-col gap-1">
+                                    <div class="flex items-center justify-between text-[11px] font-bold">
+                                        <span class="flex items-center gap-1"><i data-lucide="shopping-bag" class="w-3.5 h-3.5"></i> Drive 주문 마감 기한</span>
+                                        <span x-text="calculateOrderWindow(project.deliveryDate).deadlineDateStr"></span>
+                                    </div>
+                                    <div class="flex items-center justify-between text-[10px] mt-1">
+                                        <span class="opacity-80">기한까지 남은 개월수</span>
+                                        <span class="font-extrabold" x-text="project.deliveryDate ? (calculateOrderWindow(project.deliveryDate).monthsLeft + '개월') : '-'"></span>
+                                    </div>
+                                </div>
+                                <div class="space-y-1.5 border-t border-slate-100 pt-3 text-[11px]">
+                                    <div class="flex items-center justify-between"><span class="text-slate-400 font-bold">발주기관</span><span class="font-bold text-slate-700 truncate max-w-[170px]" x-text="project.company || '-'"></span></div>
+                                    <div class="flex items-center justify-between"><span class="text-slate-400">등록일</span><span class="font-bold text-slate-800" x-text="project.registeredAt || '-'"></span></div>
+                                    <div class="flex items-center justify-between"><span class="text-slate-400">계약번호/프로젝트번호</span><span class="font-medium text-slate-700" x-text="project.contractNo || project.projectNo || '-'"></span></div>
+                                    <div class="flex items-center justify-between"><span class="text-slate-400">예산/금액</span><span class="font-extrabold text-[#E0001A]" x-text="formatBudget(project)"></span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+
+                <div x-show="!isLoading && filteredAndSortedProjects().length > 0 && viewMode === 'table'" class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm" style="display:none;">
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left border-collapse">
+                            <thead>
+                                <tr class="bg-slate-100 border-b border-gray-200 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                                    <th class="py-3 px-4">프로젝트명</th>
+                                    <th class="py-3 px-4">기관</th>
+                                    <th class="py-3 px-4">공고번호</th>
+                                    <th class="py-3 px-4">지역</th>
+                                    <th class="py-3 px-4">등록일</th>
+                                    <th class="py-3 px-4">출처</th>
+                                    <th class="py-3 px-4 text-right">예산/금액</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100 text-xs">
+                                <template x-for="project in filteredAndSortedProjects()" :key="project.id">
+                                    <tr @click="selectedProject = project; $nextTick(() => lucide.createIcons())" class="hover:bg-slate-50 cursor-pointer transition">
+                                        <td class="py-3 px-4 font-bold text-slate-800" x-text="project.name"></td>
+                                        <td class="py-3 px-4 text-slate-600" x-text="project.company || '-'"></td>
+                                        <td class="py-3 px-4 font-mono text-slate-600" x-text="project.announcementNo || '-'"></td>
+                                        <td class="py-3 px-4 text-slate-600" x-text="project.region || '-'"></td>
+                                        <td class="py-3 px-4 font-semibold text-slate-700" x-text="project.registeredAt || '-'"></td>
+                                        <td class="py-3 px-4 text-slate-600" x-text="project.sourceService"></td>
+                                        <td class="py-3 px-4 text-right font-extrabold text-slate-800" x-text="formatBudget(project)"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="bg-[#232323] text-white py-8 mt-12 border-t-4 border-[#E0001A]">
+        <div class="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between text-xs text-slate-400 gap-4">
+            <p>Made by Minsu Kim</p>
+            <div class="flex gap-6"><span>조달청 나라장터 API 실시간 연계</span><span>ABB Ability™ Data Integration</span></div>
+        </div>
+    </footer>
+
+    <div x-show="selectedProject" class="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4" style="display:none;" x-cloak>
+        <template x-if="selectedProject">
+            <div class="bg-white w-full max-w-5xl rounded-2xl shadow-2xl border-t-8 border-[#E0001A] overflow-hidden max-h-[95vh] flex flex-col animate-scaleUp">
+                <div class="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+                    <div class="flex items-center gap-2"><i data-lucide="ship" class="text-[#E0001A] w-5 h-5"></i><span class="text-xs font-black text-slate-800 tracking-wider">PROJECT ANALYSIS SPECIFICATION</span></div>
+                    <button @click="selectedProject = null" class="p-2 hover:bg-slate-200 rounded transition text-slate-500"><i data-lucide="x" class="w-5 h-5"></i></button>
+                </div>
+                <div class="flex-1 overflow-y-auto p-6 space-y-6">
+                    <div>
+                        <span class="text-xs font-bold text-slate-400 font-mono" x-text="selectedProject.sourceService + ' / ' + selectedProject.sourceOperation"></span>
+                        <h2 class="text-2xl font-black text-slate-800 mt-1 leading-tight" x-text="selectedProject.name"></h2>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="bg-slate-50 rounded-xl p-5 border border-slate-100 space-y-4">
+                            <h3 class="font-bold text-sm text-slate-800 flex items-center gap-1.5"><i data-lucide="building-2" class="text-[#E0001A] w-4.5 h-4.5"></i> 핵심 정보</h3>
+                            <div class="space-y-3 text-xs">
+                                <div class="flex items-center justify-between"><span class="text-slate-400">기관명</span><span class="font-semibold text-slate-700" x-text="selectedProject.company || '-'"></span></div>
+                                <div class="flex items-center justify-between"><span class="text-slate-400">공고번호</span><span class="font-semibold text-slate-700" x-text="selectedProject.announcementNo || '-'"></span></div>
+                                <div class="flex items-center justify-between"><span class="text-slate-400">계약번호</span><span class="font-semibold text-slate-700" x-text="selectedProject.contractNo || '-'"></span></div>
+                                <div class="flex items-center justify-between"><span class="text-slate-400">프로젝트번호</span><span class="font-semibold text-slate-700" x-text="selectedProject.projectNo || '-'"></span></div>
+                                <div class="flex items-center justify-between"><span class="text-slate-400">지역</span><span class="font-semibold text-slate-700" x-text="selectedProject.region || '-'"></span></div>
+                                <div class="flex items-center justify-between"><span class="text-slate-400">등록일</span><span class="font-semibold text-slate-700" x-text="selectedProject.registeredAt || '-'"></span></div>
+                                <div class="flex items-center justify-between"><span class="text-slate-400">예산/금액</span><span class="font-bold text-blue-600" x-text="formatBudget(selectedProject)"></span></div>
+                                <div class="flex items-center justify-between"><span class="text-slate-400">키워드</span><span class="font-semibold text-slate-700" x-text="(selectedProject.matchedKeywords || []).join(', ') || '-'"></span></div>
+                            </div>
+                        </div>
+                        <div class="bg-slate-900 text-slate-100 rounded-xl p-5 border border-slate-800 space-y-4 shadow-inner">
+                            <div class="flex items-center gap-2"><i data-lucide="cpu" class="text-blue-400 w-4 h-4"></i><h4 class="text-xs font-bold uppercase tracking-wider text-slate-200">원본 데이터 Payload</h4></div>
+                            <pre class="text-xs text-slate-300 bg-slate-800/50 p-3 rounded-xl overflow-x-auto" x-text="formattedRaw(selectedProject)"></pre>
+                        </div>
+                    </div>
+                    <div class="space-y-3">
+                        <h3 class="font-bold text-sm text-slate-800">수집된 출처 정보</h3>
+                        <div class="space-y-2">
+                            <template x-for="src in selectedProject.sources" :key="src.id">
+                                <a :href="src.url" target="_blank" rel="noreferrer" class="flex items-center justify-between p-3 bg-slate-50 border border-slate-100 rounded-xl hover:bg-slate-100 transition group">
+                                    <div class="space-y-1">
+                                        <span class="text-[10px] text-slate-400 block"><span x-text="src.publisher"></span> • <span x-text="src.date"></span></span>
+                                        <span class="text-xs font-bold text-slate-700 group-hover:text-[#E0001A] transition" x-text="src.title"></span>
+                                    </div>
+                                    <i data-lucide="arrow-up-right" class="text-slate-400 group-hover:text-[#E0001A] transition w-3.5 h-3.5"></i>
+                                </a>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </template>
+    </div>
+</body>
+</html>
