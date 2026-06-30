@@ -92,72 +92,17 @@
                     return calcOrderWindow(deliveryDateStr);
                 },
 
-                appendThinkingLog(message) {
-                    if (!message) return;
-                    const lastMessage = this.thinkingLogs[this.thinkingLogs.length - 1];
-                    if (lastMessage !== message) {
-                        this.thinkingLogs.push(message);
-                    }
-                },
-
-                sleep(ms) {
-                    return new Promise((resolve) => setTimeout(resolve, ms));
-                },
-
-                collectorLabel(alias) {
-                    const labels = {
-                        bid: '입찰공고',
-                        contract: '계약',
-                        award: '낙찰',
-                        order_plan: '발주계획',
-                        prespec: '사전규격',
-                        public_data: '공공데이터개방표준',
-                        ship_support: '선박제원',
-                        ship_operation: '선박운항',
-                        user_info: '사용자정보',
-                        incheon_port: '인천항만'
-                    };
-                    return labels[alias] || alias || '수집';
-                },
-
-                async apiRequest(url, options = {}) {
-                    const response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            ...(options.headers || {})
-                        },
-                        ...options
-                    });
-
-                    const rawText = await response.text();
-                    let data = null;
-
-                    if (rawText) {
-                        try {
-                            data = JSON.parse(rawText);
-                        } catch (parseError) {
-                            data = null;
-                        }
-                    }
-
-                    if (!response.ok) {
-                        const detail = data?.detail || data?.message || rawText || `HTTP ${response.status}`;
-                        throw new Error(detail);
-                    }
-
-                    return data;
-                },
-
                 async fetchLatestProjects() {
                     this.isLoading = true;
                     try {
-                        const data = await this.apiRequest('/api/projects');
-                        this.projects = Array.isArray(data?.projects) ? data.projects : [];
-                        this.lastCollectedAt = data?.lastCollectedAt || null;
+                        const response = await fetch('/api/projects');
+                        if (!response.ok) throw new Error('프로젝트 조회 실패');
+                        const data = await response.json();
+                        this.projects = Array.isArray(data.projects) ? data.projects : [];
+                        this.lastCollectedAt = data.lastCollectedAt || null;
                     } catch (error) {
                         console.error(error);
                         this.projects = [];
-                        this.lastCollectedAt = null;
                         this.triggerToast('프로젝트를 불러오지 못했습니다.');
                     } finally {
                         this.isLoading = false;
@@ -165,70 +110,35 @@
                     }
                 },
 
-                async pollCollectJob(jobId) {
-                    let retryCount = 0;
-
-                    while (true) {
-                        try {
-                            const status = await this.apiRequest('/api/collect/status');
-
-                            if (jobId && status?.jobId && status.jobId !== jobId) {
-                                await this.sleep(1500);
-                                continue;
-                            }
-
-                            if (status?.currentStep) {
-                                this.appendThinkingLog(`${this.collectorLabel(status.currentStep)} 수집 중...`);
-                                this.thinkingStep = Math.min(5, Math.max(1, this.thinkingLogs.length));
-                            }
-
-                            if (status?.message) {
-                                this.appendThinkingLog(status.message);
-                            }
-
-                            if (status?.status === 'SUCCESS' || status?.status === 'FAILED') {
-                                return status;
-                            }
-
-                            retryCount = 0;
-                        } catch (error) {
-                            retryCount += 1;
-                            if (retryCount >= 3) {
-                                throw error;
-                            }
-                            this.appendThinkingLog('상태 재확인 중...');
-                        }
-
-                        await this.sleep(2500);
-                    }
-                },
-
                 async runAiThinking() {
-                    if (this.isThinking) {
-                        this.triggerToast('이미 수집 작업이 실행 중입니다.');
-                        return;
-                    }
-
                     this.isThinking = true;
-                    this.thinkingStep = 1;
-                    this.thinkingLogs = ['백그라운드 수집 요청 중...'];
-
-                    try {
-                        const start = await this.apiRequest('/api/collect', { method: 'POST' });
-                        this.appendThinkingLog(start?.message || '수집 작업이 시작되었습니다.');
-
-                        const finalStatus = await this.pollCollectJob(start?.jobId);
-                        await this.fetchLatestProjects();
-
-                        if (finalStatus?.status === 'SUCCESS') {
-                            this.thinkingStep = 5;
-                            this.triggerToast(finalStatus?.message || '수집이 완료되었습니다.');
-                        } else {
-                            this.triggerToast(finalStatus?.error || finalStatus?.message || '수집 중 오류가 발생했습니다.');
+                    this.thinkingStep = 0;
+                    this.thinkingLogs = [];
+                    const steps = [
+                        '나라장터 입찰공고 수집 중...',
+                        '계약 / 낙찰 / 발주계획 / 사전규격 수집 중...',
+                        '공공데이터개방표준 / 선박제원 / 선박운항 수집 중...',
+                        '중복 제거 및 DB 저장 중...',
+                        '프론트엔드 재조회 중...'
+                    ];
+                    const timer = setInterval(() => {
+                        if (this.thinkingStep < steps.length) {
+                            this.thinkingLogs.push(steps[this.thinkingStep]);
+                            this.thinkingStep += 1;
                         }
+                    }, 500);
+                    try {
+                        const response = await fetch('/api/collect', { method: 'POST' });
+                        const data = await response.json();
+                        clearInterval(timer);
+                        this.thinkingLogs = steps;
+                        this.thinkingStep = steps.length;
+                        await this.fetchLatestProjects();
+                        this.triggerToast(data.message || '수집이 완료되었습니다.');
                     } catch (error) {
+                        clearInterval(timer);
                         console.error(error);
-                        this.triggerToast(error?.message || '수집 시작 중 오류가 발생했습니다.');
+                        this.triggerToast('수집 중 오류가 발생했습니다.');
                     } finally {
                         this.isThinking = false;
                         this.$nextTick(() => lucide.createIcons());
@@ -240,35 +150,14 @@
                         this.triggerToast('인천항만 Collector는 보류 상태입니다.');
                         return;
                     }
-
-                    if (this.isThinking) {
-                        this.triggerToast('이미 수집 작업이 실행 중입니다.');
-                        return;
-                    }
-
-                    this.isThinking = true;
-                    this.thinkingStep = 1;
-                    this.thinkingLogs = [`${channel.name} 실행 요청 중...`];
-
                     try {
-                        const start = await this.apiRequest(`/api/collect/${channel.id}`, { method: 'POST' });
-                        this.appendThinkingLog(start?.message || `${channel.name} 수집 시작`);
-
-                        const finalStatus = await this.pollCollectJob(start?.jobId);
+                        const response = await fetch(`/api/collect/${channel.id}`, { method: 'POST' });
+                        const data = await response.json();
                         await this.fetchLatestProjects();
-
-                        if (finalStatus?.status === 'SUCCESS') {
-                            this.thinkingStep = 5;
-                            this.triggerToast(finalStatus?.message || `${channel.name} 실행 완료`);
-                        } else {
-                            this.triggerToast(finalStatus?.error || finalStatus?.message || `${channel.name} 실행 실패`);
-                        }
+                        this.triggerToast(data.message || `${channel.name} 실행 완료`);
                     } catch (error) {
                         console.error(error);
-                        this.triggerToast(error?.message || `${channel.name} 실행 실패`);
-                    } finally {
-                        this.isThinking = false;
-                        this.$nextTick(() => lucide.createIcons());
+                        this.triggerToast(`${channel.name} 실행 실패`);
                     }
                 },
 
@@ -591,6 +480,5 @@
             </div>
         </template>
     </div>
-<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"4edd5f8ec12a48cfa682ab8261b80a79","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
 </body>
 </html>
