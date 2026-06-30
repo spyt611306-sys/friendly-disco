@@ -3,7 +3,7 @@ import asyncio
 import json
 import logging
 import os
-from contextlib import closing
+from contextlib import closing, suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -50,6 +50,65 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def utc_now_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def new_collect_job() -> Dict[str, Any]:
+    return {
+        "running": False,
+        "jobId": None,
+        "mode": None,
+        "collectorAlias": None,
+        "status": "IDLE",
+        "currentStep": None,
+        "savedCount": 0,
+        "rawCount": 0,
+        "message": None,
+        "error": None,
+        "startedAt": None,
+        "finishedAt": None,
+        "lastCollectedAt": None,
+    }
+
+
+COLLECT_JOB: Dict[str, Any] = new_collect_job()
+COLLECT_TASK: Optional[asyncio.Task] = None
+COLLECT_TASK_TIMEOUT_SECONDS = int(os.getenv("COLLECT_TASK_TIMEOUT_SECONDS", "180"))
+
+
+def start_collect_job(mode: str, collector_alias: Optional[str] = None) -> Dict[str, Any]:
+    global COLLECT_JOB
+    COLLECT_JOB = {
+        **new_collect_job(),
+        "running": True,
+        "jobId": str(uuid4()),
+        "mode": mode,
+        "collectorAlias": collector_alias,
+        "status": "RUNNING",
+        "message": "수집 작업을 시작했습니다.",
+        "startedAt": utc_now_iso(),
+    }
+    return COLLECT_JOB
+
+
+def finish_collect_job(status: str, message: str, error: Optional[str] = None, current_step: Optional[str] = None) -> None:
+    global COLLECT_TASK
+    COLLECT_JOB["running"] = False
+    COLLECT_JOB["status"] = status
+    COLLECT_JOB["message"] = message
+    COLLECT_JOB["error"] = error
+    COLLECT_JOB["currentStep"] = current_step
+    COLLECT_JOB["finishedAt"] = utc_now_iso()
+    COLLECT_TASK = None
+
+
+def reset_collect_job_state() -> None:
+    global COLLECT_JOB, COLLECT_TASK
+    COLLECT_JOB = new_collect_job()
+    COLLECT_TASK = None
 
 
 def get_db_connection():
@@ -338,6 +397,111 @@ async def execute_pipeline() -> Dict[str, Any]:
     }
 
 
+async def execute_pipeline_in_background(job_id: str) -> None:
+    registry = make_registry()
+    all_projects: List[Dict[str, Any]] = []
+    processed_count = 0
+
+    ordered_aliases = [
+        "bid",
+        "contract",
+        "award",
+        "order_plan",
+        "prespec",
+        "public_data",
+        "ship_support",
+        "ship_operation",
+    ]
+
+    try:
+        for alias in ordered_aliases:
+            if COLLECT_JOB.get("jobId") != job_id:
+                return
+
+            COLLECT_JOB["currentStep"] = alias
+            COLLECT_JOB["message"] = f"{alias} 수집 중"
+
+            collector = registry[alias]
+            seed_input = all_projects if alias in {"ship_support", "ship_operation"} else None
+            try:
+                projects = await asyncio.wait_for(
+                    execute_single_collector(alias, collector, seed_input),
+                    timeout=COLLECT_TASK_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(f"{alias} 수집이 {COLLECT_TASK_TIMEOUT_SECONDS}초를 초과하여 중단되었습니다.")
+            all_projects.extend(projects)
+
+            per_collector_deduped = dedupe_projects(projects)
+            if per_collector_deduped:
+                save_projects(per_collector_deduped)
+                processed_count += len(per_collector_deduped)
+
+            COLLECT_JOB["rawCount"] = len(all_projects)
+            COLLECT_JOB["savedCount"] = processed_count
+            COLLECT_JOB["message"] = f"{alias} 완료: 원본 {len(projects)}건 / 임시 저장 {len(per_collector_deduped)}건"
+
+        overall_deduped = dedupe_projects(all_projects)
+        if overall_deduped:
+            save_projects(overall_deduped)
+
+        snapshot = fetch_projects_from_db()
+        COLLECT_JOB["savedCount"] = len(snapshot.get("projects", []))
+        COLLECT_JOB["lastCollectedAt"] = snapshot.get("lastCollectedAt")
+        finish_collect_job(
+            status="SUCCESS",
+            message=f"수집 완료: 원본 {len(all_projects)}건 / 최종 저장 {len(overall_deduped)}건",
+        )
+    except asyncio.CancelledError:
+        logger.warning("백그라운드 수집이 취소되었습니다. job_id=%s", job_id)
+        finish_collect_job(status="CANCELLED", message="수집 작업이 취소되었습니다.")
+        raise
+    except Exception as exc:
+        logger.exception("백그라운드 수집 실패: %s", str(exc))
+        finish_collect_job(status="FAILED", message="수집 작업이 실패했습니다.", error=str(exc))
+
+
+async def execute_single_collector_in_background(job_id: str, collector_alias: str) -> None:
+    registry = make_registry()
+    collector = registry[collector_alias]
+
+    try:
+        COLLECT_JOB["currentStep"] = collector_alias
+        COLLECT_JOB["message"] = f"{collector_alias} 수집 중"
+
+        seed_projects = None
+        if collector_alias in {"ship_support", "ship_operation"}:
+            seed_projects = fetch_projects_from_db().get("projects", [])
+
+        try:
+            projects = await asyncio.wait_for(
+                execute_single_collector(collector_alias, collector, seed_projects),
+                timeout=COLLECT_TASK_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"{collector_alias} 수집이 {COLLECT_TASK_TIMEOUT_SECONDS}초를 초과하여 중단되었습니다.")
+
+        deduped = dedupe_projects(projects)
+        if deduped:
+            save_projects(deduped)
+
+        snapshot = fetch_projects_from_db()
+        COLLECT_JOB["rawCount"] = len(projects)
+        COLLECT_JOB["savedCount"] = len(snapshot.get("projects", []))
+        COLLECT_JOB["lastCollectedAt"] = snapshot.get("lastCollectedAt")
+        finish_collect_job(
+            status="SUCCESS",
+            message=f"{collector_alias} 완료: 원본 {len(projects)}건 / 저장 {len(deduped)}건",
+        )
+    except asyncio.CancelledError:
+        logger.warning("단일 collector 수집이 취소되었습니다. alias=%s job_id=%s", collector_alias, job_id)
+        finish_collect_job(status="CANCELLED", message=f"{collector_alias} 수집이 취소되었습니다.")
+        raise
+    except Exception as exc:
+        logger.exception("단일 collector 백그라운드 수집 실패 alias=%s error=%s", collector_alias, str(exc))
+        finish_collect_job(status="FAILED", message=f"{collector_alias} 수집 실패", error=str(exc))
+
+
 @app.on_event("startup")
 def startup_event() -> None:
     ensure_tables()
@@ -375,22 +539,68 @@ def get_api_meta() -> Dict[str, Any]:
     }
 
 
+@app.get("/api/collect/status")
+def collect_status() -> Dict[str, Any]:
+    return COLLECT_JOB
+
+
+@app.post("/api/collect/reset")
+async def collect_reset() -> Dict[str, Any]:
+    global COLLECT_TASK
+
+    if COLLECT_TASK and not COLLECT_TASK.done():
+        COLLECT_TASK.cancel()
+        with suppress(asyncio.CancelledError):
+            await COLLECT_TASK
+
+    reset_collect_job_state()
+    return {
+        "status": "RESET",
+        "message": "수집 상태를 초기화했습니다.",
+    }
+
+
 @app.post("/api/collect")
 async def collect_all() -> Dict[str, Any]:
-    return await execute_pipeline()
+    global COLLECT_TASK
+
+    if COLLECT_JOB.get("running"):
+        return {
+            "status": "RUNNING",
+            "jobId": COLLECT_JOB.get("jobId"),
+            "message": "이미 수집 작업이 실행 중입니다.",
+        }
+
+    job = start_collect_job(mode="ALL")
+    COLLECT_TASK = asyncio.create_task(execute_pipeline_in_background(job["jobId"]))
+    return {
+        "status": "STARTED",
+        "jobId": job["jobId"],
+        "message": "백그라운드 수집을 시작했습니다.",
+    }
 
 
 @app.post("/api/collect/{collector_alias}")
 async def collect_one(collector_alias: str) -> Dict[str, Any]:
+    global COLLECT_TASK
+
     registry = make_registry()
     if collector_alias not in registry:
         raise HTTPException(status_code=404, detail="collector not found")
-    projects = await execute_single_collector(collector_alias, registry[collector_alias])
-    deduped = dedupe_projects(projects)
-    save_projects(deduped)
+
+    if COLLECT_JOB.get("running"):
+        return {
+            "status": "RUNNING",
+            "jobId": COLLECT_JOB.get("jobId"),
+            "message": "이미 다른 수집 작업이 실행 중입니다.",
+        }
+
+    job = start_collect_job(mode="SINGLE", collector_alias=collector_alias)
+    COLLECT_TASK = asyncio.create_task(execute_single_collector_in_background(job["jobId"], collector_alias))
     return {
-        "status": "SUCCESS",
-        "message": f"{collector_alias} 완료: 원본 {len(projects)}건 / 저장 {len(deduped)}건",
+        "status": "STARTED",
+        "jobId": job["jobId"],
+        "message": f"{collector_alias} 백그라운드 수집을 시작했습니다.",
     }
 
 
