@@ -29,10 +29,12 @@
             { id: 'incheon_port', name: '인천항만 Open API', targetUrl: '-', method: '보류', frequency: '보류', status: 'PAUSED' }
         ];
 
-        const PIPELINE_SEQUENCE = ['bid','contract','prespec','order_plan','ship_support'];
-        const MARINE_KEYWORDS = ['선박','함정','함선','실습선','탐사실습선','해양수산탐사실습선','행정선','청항선','관공선','경비함','순시선','예인선','방제선','소방정','차도선','3천톤','3000톤','3,000톤','동해행정선','군산실습선','군산청항선','우도차도선','ship','vessel','patrol vessel','training ship','government vessel','shipyard','dry dock','dock','ctv','crew transfer vessel'];
+        const PIPELINE_SEQUENCE = ['bid','contract','award','prespec','order_plan','ship_support'];
+        const MARINE_KEYWORDS = ['선박','함정','함선','실습선','탐사실습선','해양수산탐사실습선','행정선','청항선','관공선','경비함','순시선','예인선','방제선','소방정','차도선','3천톤','3000톤','3,000톤','동해행정선','군산실습선','군산청항선','우도차도선','조선소','건조','대체건조','신조','제작구매','전기추진','하이브리드 전기추진','ship','vessel','patrol vessel','training ship','government vessel','shipyard','dry dock','dock','ctv','crew transfer vessel'];
         const TITLE_EXCLUDE_KEYWORDS = ['정수장','해수담수화','혈액투석','의약품','학교','체육관','냉난방','하수','상수','배수개선','아스콘','마네킹','농업','교량','도로','터널','청진기','박스','플랜지','파이프','압축가스'];
         const WATCHLIST_TERMS = ['군산실습선','해림2호','우도차도선','우도 차도선','해경청3000톤','3000톤','3천톤','3019함','3020함','동해행정선','군산청항선','소방청300t','소방정','관공선','실습선','탐사실습선','행정선','청항선','순시선','경비함','하이브리드 전기추진','전기추진','ctv','crew transfer vessel','말콘'];
+        const SHIPYARD_TERMS = ['금하네이벌텍','동남중공업','삼원중공업','유일','대양','코리아월드써비스','신진조선','부원','대선조선','HJ중공업','에이치제이중공업','대한조선','세진중공업','조선소','shipyard'];
+        const BUILD_TERMS = ['건조','대체건조','신조','제작구매','개조','성능개량','전기추진','하이브리드 전기추진','친환경선박'];
 
         function calcOrderWindow(deliveryDateStr) {
             if (!deliveryDateStr) return { deadlineDateStr: '-', monthsLeft: 0, isOverdue: false, isUrgent: false };
@@ -59,7 +61,7 @@
                     const meta = raw._abbTargeting || {};
                     const detail = meta.detail || {};
                     const comp = detail.componentScores || {};
-                    return { score: Number(project?.abbScore ?? meta.score ?? 0), priority: project?.abbPriority || meta.priority || project?.verificationStatus || 'DROP', gateKeywords: project?.marineGateKeywords || detail.gateKeywords || [], buyerKeywords: project?.buyerKeywords || detail.buyerKeywords || [], equipmentKeywords: project?.equipmentKeywords || detail.equipmentKeywords || [], platformKeywords: project?.platformKeywords || detail.platformKeywords || [], watchlistHits: project?.watchlistHits || detail.watchlistHits || [], excludeKeywords: project?.excludeKeywords || detail.excludeKeywords || [], driveScore: Number(project?.driveScore ?? comp.driveScore ?? 0), motorScore: Number(project?.motorScore ?? comp.motorScore ?? 0), powerScore: Number(project?.powerScore ?? comp.powerScore ?? 0) };
+                    return { score: Number(project?.abbScore ?? meta.score ?? 0), priority: project?.abbPriority || meta.priority || project?.verificationStatus || 'DROP', gateKeywords: project?.marineGateKeywords || detail.gateKeywords || [], buyerKeywords: project?.buyerKeywords || detail.buyerKeywords || [], equipmentKeywords: project?.equipmentKeywords || detail.equipmentKeywords || [], platformKeywords: project?.platformKeywords || detail.platformKeywords || [], shipyardKeywords: project?.shipyardKeywords || detail.shipyardKeywords || [], buildKeywords: project?.buildKeywords || detail.buildKeywords || [], watchlistHits: project?.watchlistHits || detail.watchlistHits || [], excludeKeywords: project?.excludeKeywords || detail.excludeKeywords || [], driveScore: Number(project?.driveScore ?? comp.driveScore ?? 0), motorScore: Number(project?.motorScore ?? comp.motorScore ?? 0), powerScore: Number(project?.powerScore ?? comp.powerScore ?? 0) };
                 },
                 getBudgetRaw(project) { const raw = project?.rawPayload || {}; return project?.orderValue || raw.presmptPrce || raw.asignBdgtAmt || raw.totPrdprc || raw.cntrctAmt || raw.sumOrderAmt || raw.fnlSucsfAmt || ''; },
                 formatBudget(project) { const raw = this.getBudgetRaw(project); if (raw === null || raw === undefined || raw === '') return '-'; const num = Number(String(raw).replace(/[^0-9.-]/g, '')); if (Number.isNaN(num)) return String(raw); return (project.currency || 'KRW') === 'KRW' ? '₩ ' + num.toLocaleString('ko-KR') : (project.currency || 'USD') + ' ' + num.toLocaleString('en-US'); },
@@ -71,6 +73,7 @@
                 deliveryCoverage() { const visible = this.screenedProjects(); const withDate = visible.filter(p => !!p.deliveryDate).length; const ratio = visible.length ? withDate / visible.length : 0; return { total: visible.length, withDate, ratio }; },
                 showOrderKpis() { const c = this.deliveryCoverage(); return c.total >= 3 && c.ratio >= 0.3; },
                 isWatchlistHit(project) { const text = [project?.name, project?.company, project?.announcementNo, project?.projectNo, project?.contractNo, ...(project?.matchedKeywords || []), ...(project?.platformKeywords || []), ...(project?.watchlistHits || []), project?.keywordText].join(' ').toLowerCase(); return WATCHLIST_TERMS.some(term => text.includes(String(term).toLowerCase())); },
+                isShipyardHit(project) { const text = [project?.name, project?.company, ...(project?.shipyardKeywords || []), ...(project?.buildKeywords || []), ...(project?.matchedKeywords || []), project?.keywordText].join(' ').toLowerCase(); const hasShipyard = SHIPYARD_TERMS.some(term => text.includes(String(term).toLowerCase())); const hasBuild = BUILD_TERMS.some(term => text.includes(String(term).toLowerCase())); return hasShipyard && hasBuild; },
                 collectorLabel(alias) { const labels = { bid: '입찰공고', contract: '계약', award: '낙찰', order_plan: '발주계획', prespec: '사전규격', public_data: '공공데이터개방표준', ship_support: '선박제원', ship_operation: '선박운항', user_info: '사용자정보', incheon_port: '인천항만' }; return labels[alias] || alias || '수집'; },
                 async apiRequest(url, options = {}) { const response = await fetch(url, { headers: { 'Accept': 'application/json', ...(options.headers || {}) }, ...options }); const rawText = await response.text(); let data = null; if (rawText) { try { data = JSON.parse(rawText); } catch { data = null; } } if (!response.ok) { const detail = data?.detail || data?.message || rawText || `HTTP ${response.status}`; throw new Error(detail); } return data; },
                 async fetchLatestProjects() { this.isLoading = true; try { const data = await this.apiRequest('/api/projects'); this.projects = Array.isArray(data?.projects) ? data.projects : []; this.lastCollectedAt = data?.lastCollectedAt || null; this.dataQuality = data?.dataQuality || null; } catch (error) { console.error(error); this.projects = []; this.lastCollectedAt = null; this.dataQuality = null; this.triggerToast('프로젝트를 불러오지 못했습니다.'); } finally { this.isLoading = false; this.$nextTick(() => lucide.createIcons()); } },
@@ -139,7 +142,7 @@
             <i data-lucide="alert-circle" class="text-[#E0001A] shrink-0 mt-0.5 w-5 h-5"></i>
             <div class="text-xs text-slate-800 leading-relaxed">
                 <span class="font-bold text-[#E0001A]">자동 키워드 필터 기준:</span>
-                선박, 함정, 실습선, 탐사실습선, 행정선, 청항선, 관공선, 경비함, 차도선, 3천톤급, 우도차도선, 군산실습선, 해림2호, Ship, Vessel, CTV, 전기추진, 드라이브, VFD, 추진모터
+                선박, 함정, 실습선, 탐사실습선, 행정선, 청항선, 관공선, 경비함, 차도선, 3천톤급, 우도차도선, 군산실습선, 해림2호, 조선소, 건조, 대체건조, 신조, 제작구매, Ship, Vessel, CTV, 전기추진, 드라이브, VFD, 추진모터
             </div>
         </div>
 
@@ -150,7 +153,7 @@
                     <h3 class="text-sm font-semibold text-slate-100">Collector Pipeline 실행 중</h3>
                 </div>
                 <div class="flex items-center gap-3">
-                    <span class="text-xs text-[#E0001A] font-mono font-semibold">Step <span x-text="thinkingStep"></span>/5</span>
+                    <span class="text-xs text-[#E0001A] font-mono font-semibold">Step <span x-text="thinkingStep"></span>/<span x-text="PIPELINE_SEQUENCE.length"></span></span>
                     <button @click="resetCollectState()" class="px-2 py-1 text-[10px] font-bold rounded border border-slate-700 text-slate-300 hover:bg-slate-800">닫기/초기화</button>
                 </div>
             </div>
@@ -159,7 +162,7 @@
                     <div class="flex items-start gap-2 text-slate-300"><span class="text-[#E0001A]">✓</span><span x-text="log"></span></div>
                 </template>
                 <div class="h-2 w-full bg-slate-800 rounded-full overflow-hidden mt-3">
-                    <div class="h-full bg-[#E0001A] transition-all duration-500" :style="'width: ' + ((thinkingStep/5)*100) + '%'"}></div>
+                    <div class="h-full bg-[#E0001A] transition-all duration-500" :style="'width: ' + ((thinkingStep/PIPELINE_SEQUENCE.length)*100) + '%'"}></div>
                 </div>
             </div>
         </div>
@@ -209,6 +212,7 @@
                         <div class="flex rounded bg-slate-100 p-1 lg:col-span-3">
                             <button @click="focusMode = 'ALL'" :class="focusMode === 'ALL' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">전체</button>
                             <button @click="focusMode = 'WATCHLIST'" :class="focusMode === 'WATCHLIST' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">관심 PJT</button>
+                            <button @click="focusMode = 'SHIPYARD'" :class="focusMode === 'SHIPYARD' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">중소형 조선소</button>
                             <button @click="focusMode = 'UNVERIFIED'" :class="focusMode === 'UNVERIFIED' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">미검증</button>
                         </div>
                         <div class="flex rounded bg-slate-100 p-1 lg:col-span-3">
@@ -281,6 +285,8 @@
                                     <span class="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold" x-text="`Drive ${getAbbMeta(project).driveScore}`"></span>
                                     <span class="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold" x-text="`Motor ${getAbbMeta(project).motorScore}`"></span>
                                     <span class="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold" x-text="`Power ${getAbbMeta(project).powerScore}`"></span>
+                                    <template x-if="isShipyardHit(project)"><span class="bg-blue-50 text-blue-700 px-2 py-0.5 rounded font-bold border border-blue-200">조선소 Hit</span></template>
+                                    <template x-if="(getAbbMeta(project).buildKeywords || []).length > 0"><span class="bg-violet-50 text-violet-700 px-2 py-0.5 rounded font-bold border border-violet-200">건조 문맥</span></template>
                                 </div>
                                 <div class="space-y-1.5 border-t border-slate-100 pt-3 text-[11px]">
                                     <div class="flex items-center justify-between"><span class="text-slate-400 font-bold">발주기관</span><span class="font-bold text-slate-700 truncate max-w-[170px]" x-text="project.company || '-'"></span></div>
@@ -368,6 +374,14 @@
                                 <div class="flex flex-wrap gap-2">
                                     <template x-for="kw in (selectedProject.matchedKeywords || [])" :key="kw">
                                         <span class="px-2 py-1 rounded-full bg-white border border-slate-200 text-[11px] font-semibold text-slate-700" x-text="kw"></span>
+                                    </template>
+                                </div>
+                                <div class="flex flex-wrap gap-2 pt-2">
+                                    <template x-for="kw in (selectedProject.shipyardKeywords || [])" :key="`shipyard-${kw}`">
+                                        <span class="px-2 py-1 rounded-full bg-blue-50 border border-blue-200 text-[11px] font-semibold text-blue-700" x-text="`조선소 ${kw}`"></span>
+                                    </template>
+                                    <template x-for="kw in (selectedProject.buildKeywords || [])" :key="`build-${kw}`">
+                                        <span class="px-2 py-1 rounded-full bg-violet-50 border border-violet-200 text-[11px] font-semibold text-violet-700" x-text="`건조 ${kw}`"></span>
                                     </template>
                                 </div>
                             </div>

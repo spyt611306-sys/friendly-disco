@@ -86,10 +86,12 @@ def new_collect_job() -> Dict[str, Any]:
 COLLECT_JOB: Dict[str, Any] = new_collect_job()
 COLLECT_TASK: Optional[asyncio.Task] = None
 COLLECT_TASK_TIMEOUT_SECONDS = int(os.getenv("COLLECT_TASK_TIMEOUT_SECONDS", "120"))
-DEFAULT_PIPELINE_ALIASES = [x.strip() for x in os.getenv("DEFAULT_PIPELINE_ALIASES", "bid,contract,prespec,order_plan,ship_support").split(",") if x.strip()]
-DISPLAY_PLATFORM_KEYWORDS = ["선박", "함정", "함선", "실습선", "탐사실습선", "해양수산탐사실습선", "행정선", "청항선", "관공선", "경비함", "순시선", "예인선", "방제선", "소방정", "차도선", "3천톤", "3000톤", "3,000톤", "동해행정선", "군산실습선", "군산청항선", "우도차도선", "ship", "vessel", "patrol vessel", "training ship", "government vessel", "shipyard", "dry dock", "dock", "ctv", "crew transfer vessel"]
+DEFAULT_PIPELINE_ALIASES = [x.strip() for x in os.getenv("DEFAULT_PIPELINE_ALIASES", "bid,contract,award,prespec,order_plan,ship_support").split(",") if x.strip()]
+DISPLAY_PLATFORM_KEYWORDS = ["선박", "함정", "함선", "실습선", "탐사실습선", "해양수산탐사실습선", "행정선", "청항선", "관공선", "경비함", "순시선", "예인선", "방제선", "소방정", "차도선", "3천톤", "3000톤", "3,000톤", "동해행정선", "군산실습선", "군산청항선", "우도차도선", "조선소", "건조", "대체건조", "신조", "제작구매", "전기추진", "하이브리드 전기추진", "ship", "vessel", "patrol vessel", "training ship", "government vessel", "shipyard", "dry dock", "dock", "ctv", "crew transfer vessel"]
 DISPLAY_EXCLUDE_KEYWORDS = ["정수장", "해수담수화", "혈액투석", "의약품", "학교", "체육관", "냉난방", "하수", "상수", "배수개선", "아스콘", "마네킹", "농업", "교량", "도로", "터널", "청진기", "박스", "플랜지", "파이프", "압축가스"]
 WATCHLIST_KEYWORDS = ["군산실습선", "해림2호", "우도차도선", "우도 차도선", "해경청3000톤", "3000톤", "3천톤", "3019함", "3020함", "동해행정선", "군산청항선", "소방청300t", "소방정", "관공선", "실습선", "탐사실습선", "행정선", "청항선", "순시선", "경비함", "하이브리드 전기추진", "전기추진", "ctv", "crew transfer vessel", "말콘"]
+SHIPYARD_WATCHLIST = [x.strip() for x in os.getenv("SHIPYARD_WATCHLIST", "금하네이벌텍,동남중공업,삼원중공업,유일,대양,코리아월드써비스,신진조선,부원,대선조선,HJ중공업,에이치제이중공업,대한조선,세진중공업,조선소,shipyard").split(",") if x.strip()]
+BUILD_WATCHLIST = [x.strip() for x in os.getenv("VESSEL_BUILD_WATCHLIST", "건조,대체건조,신조,제작구매,개조,성능개량,전기추진,하이브리드 전기추진,친환경선박").split(",") if x.strip()]
 
 
 def normalize_display_text(value: Any) -> str:
@@ -112,6 +114,8 @@ def extract_abb_meta(raw_payload: Dict[str, Any]) -> Dict[str, Any]:
         "buyerKeywords": detail.get("buyerKeywords") or [],
         "equipmentKeywords": detail.get("equipmentKeywords") or [],
         "platformKeywords": detail.get("platformKeywords") or [],
+        "shipyardKeywords": detail.get("shipyardKeywords") or [],
+        "buildKeywords": detail.get("buildKeywords") or [],
         "watchlistHits": detail.get("watchlistHits") or [],
         "excludeKeywords": detail.get("excludeKeywords") or [],
         "driveScore": int(component.get("driveScore") or 0),
@@ -135,17 +139,33 @@ def is_watchlist_hit(project: Dict[str, Any]) -> bool:
     return any(keyword.lower() in text for keyword in WATCHLIST_KEYWORDS)
 
 
+def is_shipyard_hit(project: Dict[str, Any]) -> bool:
+    text = " ".join([
+        str(project.get("name") or ""),
+        str(project.get("company") or ""),
+        str(project.get("keywordText") or ""),
+        " ".join(project.get("matchedKeywords") or []),
+        " ".join(project.get("shipyardKeywords") or []),
+        " ".join(project.get("buildKeywords") or []),
+    ]).lower()
+    has_shipyard = any(keyword.lower() in text for keyword in SHIPYARD_WATCHLIST)
+    has_build = any(keyword.lower() in text for keyword in BUILD_WATCHLIST)
+    return has_shipyard and has_build
+
+
 def project_data_quality(projects: List[Dict[str, Any]]) -> Dict[str, Any]:
     total = len(projects)
     with_delivery = sum(1 for p in projects if p.get("deliveryDate"))
     verified = sum(1 for p in projects if p.get("verifiedStatus") == "VERIFIED")
     watch_hits = sum(1 for p in projects if is_watchlist_hit(p))
+    shipyard_hits = sum(1 for p in projects if is_shipyard_hit(p))
     return {
         "total": total,
         "withDeliveryDate": with_delivery,
         "deliveryCoverage": round(with_delivery / total, 4) if total else 0,
         "verifiedCount": verified,
         "watchlistHitCount": watch_hits,
+        "shipyardHitCount": shipyard_hits,
     }
 
 
@@ -156,13 +176,17 @@ def should_display_project(project: Dict[str, Any]) -> bool:
     company = project.get("company") or ""
     abb = extract_abb_meta(project.get("rawPayload") or {})
     has_watchlist = bool(abb.get("watchlistHits")) or is_watchlist_hit(project)
-    has_platform = has_watchlist or bool(abb.get("platformKeywords")) or contains_any_keyword(title, DISPLAY_PLATFORM_KEYWORDS) or contains_any_keyword(company, DISPLAY_PLATFORM_KEYWORDS)
+    has_shipyard = bool(abb.get("shipyardKeywords")) or is_shipyard_hit(project)
+    has_build = bool(abb.get("buildKeywords")) or contains_any_keyword(title, BUILD_WATCHLIST)
+    has_platform = has_watchlist or has_shipyard or bool(abb.get("platformKeywords")) or contains_any_keyword(title, DISPLAY_PLATFORM_KEYWORDS) or contains_any_keyword(company, DISPLAY_PLATFORM_KEYWORDS)
     has_buyer = bool(abb.get("buyerKeywords"))
     has_equipment = bool(abb.get("equipmentKeywords")) or any(int(abb.get(k, 0) or 0) > 0 for k in ["driveScore", "motorScore", "powerScore"])
     hard_excluded = contains_any_keyword(title, DISPLAY_EXCLUDE_KEYWORDS)
     if hard_excluded and not has_platform:
         return False
     if has_watchlist:
+        return True
+    if has_shipyard and has_build and abb.get("score", 0) >= 40:
         return True
     if has_platform and abb.get("priority") in {"HOT", "WARM", "WATCH"} and abb.get("score", 0) >= 45:
         return True
@@ -419,6 +443,8 @@ def row_to_project(row: Dict[str, Any]) -> Dict[str, Any]:
         "buyerKeywords": abb_meta.get("buyerKeywords", []),
         "equipmentKeywords": abb_meta.get("equipmentKeywords", []),
         "platformKeywords": abb_meta.get("platformKeywords", []),
+        "shipyardKeywords": abb_meta.get("shipyardKeywords", []),
+        "buildKeywords": abb_meta.get("buildKeywords", []),
         "watchlistHits": abb_meta.get("watchlistHits", []),
         "excludeKeywords": abb_meta.get("excludeKeywords", []),
         "verifiedStatus": ((raw_payload.get("_verified") or {}).get("status") or "UNVERIFIED"),
@@ -463,6 +489,8 @@ def fetch_projects_from_db(q: str = "", focus: str = "ALL", verified_only: bool 
                     projects = [project for project in projects if project.get("verifiedStatus") == "VERIFIED"]
                 if focus == "WATCHLIST":
                     projects = [project for project in projects if is_watchlist_hit(project)]
+                elif focus == "SHIPYARD":
+                    projects = [project for project in projects if is_shipyard_hit(project)]
                 elif focus == "VERIFIED":
                     projects = [project for project in projects if project.get("verifiedStatus") == "VERIFIED"]
                 return {
