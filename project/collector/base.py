@@ -14,9 +14,11 @@ logger = logging.getLogger("sdi.collector")
 
 # 1) 해양/선박 필수 게이트 키워드
 REQUIRED_MARINE_GATE_KEYWORDS = [
-    "선박", "함정", "함선", "조선소", "해양", "해군", "해경", "해양경찰",
-    "ship", "vessel", "shipyard", "shipbuilding", "marine", "naval", "coast guard",
-    "offshore", "항만", "관공선", "경비함", "순시선", "예인선", "부선"
+    "선박", "함정", "함선", "조선", "조선소", "실습선", "행정선", "청항선", "관공선",
+    "경비함", "순시선", "예인선", "방제선", "지원선", "부선", "경비정", "함정정비",
+    "3천톤", "3000톤", "3,000톤", "동해행정선", "군산실습선", "군산청항선",
+    "ship", "vessel", "patrol vessel", "training ship", "government vessel", "shipyard",
+    "shipbuilding", "dry dock", "dock", "offshore vessel", "coast guard vessel"
 ]
 
 # 2) ABB 드라이브 기술영업 관점 우선 고객/발주처 문맥
@@ -131,10 +133,27 @@ NON_MARINE_EXCLUDE_KEYWORDS: Dict[str, int] = {
     "하천": 16,
 }
 
+GENERIC_SUPPLY_EXCLUDE_KEYWORDS: Dict[str, int] = {
+    "밸브": 26,
+    "플랜지": 26,
+    "파이프": 24,
+    "배관": 22,
+    "박스": 22,
+    "청진기": 26,
+    "의약품": 28,
+    "소모품": 18,
+    "압축가스": 18,
+    "냉난방기": 24,
+    "히트펌프": 24,
+    "폭발물": 18,
+    "플라스틱": 16,
+}
+
 
 TITLE_HARD_EXCLUDE_KEYWORDS = [
     "정수장", "해수담수화", "혈액투석", "의약품", "체육관", "냉난방", "학교", "하수", "상수",
-    "배수개선", "아스콘", "마네킹", "농업", "엘리베이터", "병원", "도로", "교량", "터널"
+    "배수개선", "아스콘", "마네킹", "농업", "엘리베이터", "병원", "도로", "교량", "터널",
+    "청진기", "박스", "플랜지", "파이프", "압축가스"
 ]
 
 ABB_DRIVE_KEYWORDS: Dict[str, int] = {
@@ -279,8 +298,9 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
     gate_matches = unique_keep_order(title_gate_matches + company_gate_matches)
     hard_title_excludes = find_keyword_matches(title_norm, TITLE_HARD_EXCLUDE_KEYWORDS)
 
-    ship_source_bonus = 20 if source_type == "SHIP" else 0
+    ship_source_bonus = 28 if source_type == "SHIP" else 0
     exclude_score, exclude_hits = weighted_hits(full_norm, NON_MARINE_EXCLUDE_KEYWORDS)
+    commodity_exclude_score, commodity_exclude_hits = weighted_hits(title_norm, GENERIC_SUPPLY_EXCLUDE_KEYWORDS)
 
     buyer_title_score, buyer_title_hits = weighted_hits(title_norm, ABB_BUYER_KEYWORDS)
     buyer_company_score, buyer_company_hits = weighted_hits(company_norm, ABB_BUYER_KEYWORDS)
@@ -299,59 +319,120 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
     power_title_score, power_title_hits = weighted_hits(title_norm, ABB_POWER_KEYWORDS)
     power_full_score, power_full_hits = weighted_hits(full_norm, ABB_POWER_KEYWORDS)
 
-    has_strong_gate = bool(gate_matches) or source_type == "SHIP"
-    has_equipment = bool(equip_title_hits or equip_full_hits)
+    has_gate = bool(gate_matches) or source_type == "SHIP"
+    has_equipment = bool(equip_title_hits or equip_full_hits or drive_title_hits or drive_full_hits or motor_title_hits or motor_full_hits or power_title_hits or power_full_hits)
     has_buyer = bool(buyer_title_hits or buyer_company_hits or buyer_full_hits)
-    has_platform = bool(platform_title_hits or platform_full_hits)
+    has_platform = bool(platform_title_hits or platform_full_hits or title_gate_matches)
+    buyer_only = has_buyer and not has_platform and not has_equipment
+    generic_supply_only = bool(commodity_exclude_hits) and not has_platform and source_type != "SHIP"
 
-    if hard_title_excludes and source_type != "SHIP" and not gate_matches:
+    if buyer_only:
+        return {
+            "is_target": False,
+            "score": 0,
+            "priority": "DROP",
+            "matched_keywords": [],
+            "reason": "buyer-only procurement without ship/platform context",
+            "detail": {
+                "gateKeywords": gate_matches,
+                "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
+                "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
+                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
+                "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
+                "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
+            },
+        }
+
+    if generic_supply_only:
+        return {
+            "is_target": False,
+            "score": 0,
+            "priority": "DROP",
+            "matched_keywords": [],
+            "reason": "generic commodity procurement without vessel context",
+            "detail": {
+                "gateKeywords": gate_matches,
+                "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
+                "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
+                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
+                "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
+                "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
+            },
+        }
+
+    if hard_title_excludes and source_type != "SHIP" and not has_platform:
         return {
             "is_target": False,
             "score": 0,
             "priority": "DROP",
             "matched_keywords": [],
             "reason": "title hard-excluded as non-marine",
-            "detail": {"gateKeywords": gate_matches, "excludeKeywords": unique_keep_order(exclude_hits + hard_title_excludes), "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0}},
+            "detail": {
+                "gateKeywords": gate_matches,
+                "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
+                "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
+                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
+                "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
+                "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
+            },
         }
 
-    if source_type != "SHIP" and not gate_matches:
+    if source_type != "SHIP" and not has_platform:
         return {
             "is_target": False,
             "score": 0,
             "priority": "DROP",
             "matched_keywords": [],
-            "reason": "required marine gate keyword missing in title/company",
-            "detail": {"gateKeywords": gate_matches, "excludeKeywords": exclude_hits, "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0}},
+            "reason": "ship/platform keyword missing in title/company",
+            "detail": {
+                "gateKeywords": gate_matches,
+                "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
+                "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
+                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
+                "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits),
+                "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
+            },
         }
 
     score = ship_source_bonus
-    score += buyer_title_score * 2 + buyer_company_score * 2 + max(0, buyer_full_score - buyer_title_score - buyer_company_score)
+    score += platform_title_score * 3 + max(0, platform_full_score - platform_title_score)
+    score += buyer_title_score + buyer_company_score + max(0, buyer_full_score - buyer_title_score - buyer_company_score)
     score += equip_title_score * 2 + max(0, equip_full_score - equip_title_score)
-    score += platform_title_score * 2 + max(0, platform_full_score - platform_title_score)
-    if has_strong_gate and has_equipment:
-        score += 18
-    if has_buyer and has_equipment:
-        score += 14
     if has_platform and has_equipment:
-        score += 10
+        score += 18
+    if has_platform and has_buyer:
+        score += 12
+    if has_buyer and has_equipment:
+        score += 8
 
-    if exclude_hits and not gate_matches:
-        score -= exclude_score
-    elif exclude_hits:
-        score -= int(exclude_score * 0.45)
+    if exclude_hits:
+        score -= int(exclude_score * 0.35)
+    if commodity_exclude_hits and not has_equipment:
+        score -= commodity_exclude_score
+    elif commodity_exclude_hits:
+        score -= int(commodity_exclude_score * 0.5)
 
     drive_score = drive_title_score * 2 + max(0, drive_full_score - drive_title_score)
     motor_score = motor_title_score * 2 + max(0, motor_full_score - motor_title_score)
     power_score = power_title_score * 2 + max(0, power_full_score - power_title_score)
-    if has_strong_gate:
+    if has_platform:
         drive_score += 8 if drive_score else 0
         motor_score += 8 if motor_score else 0
         power_score += 6 if power_score else 0
 
     priority = classify_priority(score)
     matched_keywords = unique_keep_order(
-        gate_matches + buyer_title_hits + buyer_company_hits + buyer_full_hits + equip_title_hits + equip_full_hits + platform_title_hits + platform_full_hits
+        gate_matches + platform_title_hits + platform_full_hits + buyer_title_hits + buyer_company_hits + buyer_full_hits + equip_title_hits + equip_full_hits
     )
+
+    detail = {
+        "gateKeywords": gate_matches,
+        "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
+        "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
+        "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + title_gate_matches),
+        "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
+        "componentScores": {"driveScore": drive_score, "motorScore": motor_score, "powerScore": power_score},
+    }
 
     if priority == "DROP":
         return {
@@ -360,14 +441,7 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
             "priority": priority,
             "matched_keywords": matched_keywords,
             "reason": "score below ABB marine-drive threshold",
-            "detail": {
-                "gateKeywords": gate_matches,
-                "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
-                "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
-                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
-                "excludeKeywords": unique_keep_order(exclude_hits + hard_title_excludes),
-                "componentScores": {"driveScore": drive_score, "motorScore": motor_score, "powerScore": power_score},
-            },
+            "detail": detail,
         }
 
     return {
@@ -376,14 +450,7 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
         "priority": priority,
         "matched_keywords": matched_keywords,
         "reason": "ABB marine-drive scoring passed",
-        "detail": {
-            "gateKeywords": gate_matches,
-            "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
-            "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
-            "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
-            "excludeKeywords": unique_keep_order(exclude_hits + hard_title_excludes),
-            "componentScores": {"driveScore": drive_score, "motorScore": motor_score, "powerScore": power_score},
-        },
+        "detail": detail,
     }
 
 
@@ -504,7 +571,7 @@ class BaseCollector:
             "etryptDt", "pubDate"
         ])
         contract_date = pick_first(raw, ["cntrctCnclsDate", "cntrctDate"])
-        delivery_date = pick_first(raw, ["dlvrTmlmtDate", "cmplnDate", "tkoffDt"])
+        delivery_date = pick_first(raw, ["dlvrTmlmtDt", "dlvrTmlmtDate", "cmplnDate", "tkoffDt"])
         shipyard = pick_first(raw, ["mkerNm", "cnstrCmpnyNm", "shipyard"])
         keyword_text = " ".join([str(v) for v in raw.values() if v is not None])
 
