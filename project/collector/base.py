@@ -12,44 +12,124 @@ import httpx
 
 logger = logging.getLogger("sdi.collector")
 
-SHIP_CORE_KEYWORDS = [
-    # 해양 / 선박 / 조선 핵심 문맥
-    "선박", "함정", "함선", "조선", "조선소", "해양", "해군", "항만",
-    "marine", "ship", "shipbuilding", "shipyard", "vessel", "offshore",
-    "fpso", "flng", "fso", "barge", "tug", "towage",
-    "관공선", "경비함", "순시선", "병원선", "예인선", "부선", "어업지도선",
-    "지원선", "운반선", "작업선", "준설선", "급유선", "청항선", "파일럿보트",
-    "pilot boat", "crew boat", "patrol vessel", "naval", "coast guard",
-    "해양경찰", "해경", "선대", "선박건조", "신조", "개조", "탑재"
+# 1) 해양/선박 필수 게이트 키워드
+REQUIRED_MARINE_GATE_KEYWORDS = [
+    "선박", "함정", "함선", "조선소", "조선", "해양", "해군", "해경", "해양경찰",
+    "ship", "vessel", "shipyard", "shipbuilding", "marine", "naval", "coast guard",
+    "offshore", "항만", "관공선", "경비함", "순시선", "예인선", "부선"
 ]
 
-SHIP_DRIVE_KEYWORDS = [
-    # 마린 전동화 / 드라이브 / 전력변환 핵심 장비 문맥
-    "드라이브", "전력변환장치", "주파수변환장치", "인버터", "컨버터",
-    "vfd", "vf drive", "variable frequency drive", "frequency converter",
-    "power converter", "power conversion system", "pcs",
-    "추진전동기", "추진모터", "모터", "전동기",
-    "propulsion", "electric propulsion", "propulsion motor",
-    "shaft generator", "pti", "pto", "thruster", "azimuth thruster",
-    "hybrid", "battery", "ess", "energy storage system",
-    "배터리", "하이브리드", "전기추진", "전기식 추진", "추진제어", "전동 추진"
-]
+# 2) ABB 드라이브 기술영업 관점 우선 고객/발주처 문맥
+ABB_BUYER_KEYWORDS: Dict[str, int] = {
+    "해양경찰": 30,
+    "해경": 28,
+    "coast guard": 28,
+    "해군": 30,
+    "navy": 30,
+    "조선소": 26,
+    "shipyard": 26,
+    "항만공사": 18,
+    "항만": 14,
+    "관공선": 18,
+    "방위사업청": 20,
+    "함정": 22,
+}
 
-SHIP_PLATFORM_KEYWORDS = [
-    # 선종 / 선박 타입 문맥
-    "lng선", "lpg선", "컨테이너선", "벌크선", "탱커", "유조선", "가스선",
-    "ro-ro", "ropax", "car carrier", "pcc", "pctc", "drillship",
-    "offshore vessel", "support vessel", "research vessel",
-    "ferry", "passenger ship", "cargo ship", "coaster"
-]
+# 3) ABB 관심 장비/솔루션 문맥
+ABB_EQUIPMENT_KEYWORDS: Dict[str, int] = {
+    "전력변환장치": 28,
+    "주파수변환장치": 28,
+    "드라이브": 22,
+    "인버터": 20,
+    "컨버터": 20,
+    "vfd": 24,
+    "vf drive": 24,
+    "variable frequency drive": 26,
+    "frequency converter": 26,
+    "power converter": 24,
+    "power conversion system": 26,
+    "pcs": 18,
+    "전기추진": 24,
+    "전동 추진": 24,
+    "electric propulsion": 24,
+    "propulsion": 14,
+    "propulsion motor": 18,
+    "추진모터": 18,
+    "추진전동기": 20,
+    "전동기": 12,
+    "모터": 10,
+    "shaft generator": 16,
+    "pti": 16,
+    "pto": 14,
+    "thruster": 16,
+    "azimuth thruster": 18,
+    "하이브리드": 18,
+    "hybrid": 18,
+    "배터리": 16,
+    "battery": 16,
+    "ess": 16,
+    "energy storage system": 18,
+}
 
-NON_MARINE_EXCLUDE_KEYWORDS = [
-    # 비해양 일반 산업/시설 문맥
-    "도로", "교량", "철도", "지하철", "터널", "건축", "건물", "청사", "학교",
-    "병원", "하수", "상수", "정수", "하수처리", "배수지", "농업", "축산", "산림",
-    "드론", "항공", "자동차", "전기차", "엘리베이터", "냉난방", "보일러",
-    "태양광", "풍력", "소각", "소방서", "도로공사", "관로", "하천"
-]
+# 4) 선종 / 플랫폼 문맥
+SHIP_PLATFORM_KEYWORDS: Dict[str, int] = {
+    "lng선": 18,
+    "lpg선": 18,
+    "컨테이너선": 16,
+    "벌크선": 14,
+    "탱커": 16,
+    "유조선": 16,
+    "가스선": 16,
+    "fpso": 22,
+    "flng": 22,
+    "fso": 18,
+    "offshore vessel": 18,
+    "support vessel": 16,
+    "research vessel": 16,
+    "병원선": 18,
+    "경비함": 22,
+    "순시선": 18,
+    "예인선": 16,
+    "부선": 14,
+    "파일럿보트": 16,
+    "pilot boat": 16,
+    "crew boat": 16,
+}
+
+# 5) 비해양 일반 산업 제외 문맥
+NON_MARINE_EXCLUDE_KEYWORDS: Dict[str, int] = {
+    "도로": 16,
+    "교량": 16,
+    "철도": 18,
+    "지하철": 18,
+    "터널": 16,
+    "건축": 14,
+    "건물": 14,
+    "청사": 12,
+    "학교": 12,
+    "병원": 12,
+    "하수": 18,
+    "상수": 18,
+    "정수": 18,
+    "하수처리": 22,
+    "배수지": 18,
+    "농업": 18,
+    "축산": 16,
+    "산림": 16,
+    "드론": 20,
+    "항공": 20,
+    "자동차": 18,
+    "전기차": 18,
+    "엘리베이터": 18,
+    "냉난방": 16,
+    "보일러": 16,
+    "태양광": 18,
+    "풍력": 16,
+    "소각": 18,
+    "소방서": 14,
+    "관로": 18,
+    "하천": 16,
+}
 
 
 def now_iso() -> str:
@@ -122,81 +202,151 @@ def normalize_text(text: str) -> str:
     return " ".join((text or "").lower().split())
 
 
-def find_keyword_matches(text: str, keywords: List[str]) -> List[str]:
+def find_keyword_matches(text: str, keywords: Iterable[str]) -> List[str]:
     normalized = normalize_text(text)
     matches: List[str] = []
     for keyword in keywords:
         if keyword.lower() in normalized:
             matches.append(keyword)
-    return sorted(set(matches), key=lambda x: keywords.index(x))
+    return sorted(set(matches))
 
 
-def evaluate_ship_relevance(text: str, source_type: str) -> Dict[str, Any]:
+def weighted_hits(text: str, weighted_keywords: Dict[str, int]) -> Tuple[int, List[str]]:
     normalized = normalize_text(text)
+    score = 0
+    hits: List[str] = []
+    for keyword, weight in weighted_keywords.items():
+        if keyword.lower() in normalized:
+            score += weight
+            hits.append(keyword)
+    return score, hits
 
-    core_matches = find_keyword_matches(normalized, SHIP_CORE_KEYWORDS)
-    drive_matches = find_keyword_matches(normalized, SHIP_DRIVE_KEYWORDS)
-    platform_matches = find_keyword_matches(normalized, SHIP_PLATFORM_KEYWORDS)
-    exclude_matches = find_keyword_matches(normalized, NON_MARINE_EXCLUDE_KEYWORDS)
 
-    # 해수부 선박 API에서 온 데이터는 우선 통과
-    if source_type == "SHIP":
-        matched = list(dict.fromkeys(core_matches + platform_matches + drive_matches))
-        return {
-            "is_target": True,
-            "matched_keywords": matched,
-            "reason": "SHIP source_type direct pass",
-        }
+def unique_keep_order(values: List[str]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
-    has_strong_ship_context = (
-        bool(platform_matches)
-        or "선박" in normalized
-        or "함정" in normalized
-        or "함선" in normalized
-        or "조선" in normalized
-        or "조선소" in normalized
-        or "marine" in normalized
-        or "ship" in normalized
-        or "vessel" in normalized
-        or "offshore" in normalized
-        or "해양경찰" in normalized
-        or "해경" in normalized
-        or "해군" in normalized
-        or "항만" in normalized
-    )
 
-    has_target_combo = bool(core_matches) and bool(drive_matches)
+def classify_priority(score: int) -> str:
+    if score >= 85:
+        return "HOT"
+    if score >= 65:
+        return "WARM"
+    if score >= 45:
+        return "WATCH"
+    return "DROP"
 
-    # 비해양 문맥이 강하고 해양 핵심 문맥이 없으면 제외
-    if exclude_matches and not has_strong_ship_context and not has_target_combo:
+
+def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, source_type: str) -> Dict[str, Any]:
+    title_norm = normalize_text(title_text)
+    company_norm = normalize_text(company_text)
+    full_norm = normalize_text(full_text)
+
+    gate_matches = find_keyword_matches(full_norm, REQUIRED_MARINE_GATE_KEYWORDS)
+
+    # SHIP 계열은 우선 통과하되 스코어는 그대로 계산
+    ship_source_bonus = 20 if source_type == "SHIP" else 0
+
+    exclude_score, exclude_hits = weighted_hits(full_norm, NON_MARINE_EXCLUDE_KEYWORDS)
+
+    buyer_title_score, buyer_title_hits = weighted_hits(title_norm, ABB_BUYER_KEYWORDS)
+    buyer_company_score, buyer_company_hits = weighted_hits(company_norm, ABB_BUYER_KEYWORDS)
+    buyer_full_score, buyer_full_hits = weighted_hits(full_norm, ABB_BUYER_KEYWORDS)
+
+    equip_title_score, equip_title_hits = weighted_hits(title_norm, ABB_EQUIPMENT_KEYWORDS)
+    equip_full_score, equip_full_hits = weighted_hits(full_norm, ABB_EQUIPMENT_KEYWORDS)
+
+    platform_title_score, platform_title_hits = weighted_hits(title_norm, SHIP_PLATFORM_KEYWORDS)
+    platform_full_score, platform_full_hits = weighted_hits(full_norm, SHIP_PLATFORM_KEYWORDS)
+
+    # 제목/기관명 일치 가중치 강화
+    score = 0
+    score += ship_source_bonus
+    score += buyer_title_score * 2
+    score += buyer_company_score * 2
+    score += max(0, buyer_full_score - buyer_title_score - buyer_company_score)
+    score += equip_title_score * 2
+    score += max(0, equip_full_score - equip_title_score)
+    score += platform_title_score * 2
+    score += max(0, platform_full_score - platform_title_score)
+
+    # 조합 보너스
+    has_marine_gate = bool(gate_matches)
+    has_equipment = bool(equip_title_hits or equip_full_hits)
+    has_buyer = bool(buyer_title_hits or buyer_company_hits or buyer_full_hits)
+    has_platform = bool(platform_title_hits or platform_full_hits)
+
+    if has_marine_gate and has_equipment:
+        score += 18
+    if has_buyer and has_equipment:
+        score += 14
+    if ("하이브리드" in full_norm or "hybrid" in full_norm) and ("전기추진" in full_norm or "electric propulsion" in full_norm or "드라이브" in full_norm or "vfd" in full_norm):
+        score += 16
+    if ("배터리" in full_norm or "battery" in full_norm or "ess" in full_norm) and ("선박" in full_norm or "ship" in full_norm or "vessel" in full_norm):
+        score += 12
+
+    # 비해양 산업 문맥 감점
+    if exclude_hits and not has_marine_gate:
+        score -= exclude_score
+    elif exclude_hits:
+        score -= int(exclude_score * 0.35)
+
+    # 필수 게이트: 해경/해군/조선소/선박 계열 문맥이 하나 이상 있어야 함
+    if source_type != "SHIP" and not has_marine_gate:
         return {
             "is_target": False,
+            "score": 0,
+            "priority": "DROP",
             "matched_keywords": [],
-            "reason": f"excluded by non-marine keywords: {exclude_matches}",
+            "reason": "required marine gate keyword missing",
+            "detail": {
+                "gateKeywords": gate_matches,
+                "excludeKeywords": exclude_hits,
+            },
         }
 
-    # 강한 선박 문맥 + 장비/플랫폼/다중 코어 키워드
-    if has_strong_ship_context and (drive_matches or platform_matches or len(core_matches) >= 2):
-        matched = list(dict.fromkeys(core_matches + platform_matches + drive_matches))
-        return {
-            "is_target": True,
-            "matched_keywords": matched,
-            "reason": "strong ship context matched",
-        }
+    priority = classify_priority(score)
+    matched_keywords = unique_keep_order(
+        gate_matches
+        + buyer_title_hits + buyer_company_hits + buyer_full_hits
+        + equip_title_hits + equip_full_hits
+        + platform_title_hits + platform_full_hits
+    )
 
-    # 선박/해양 문맥 + 드라이브/전력변환 문맥 조합
-    if has_target_combo:
-        matched = list(dict.fromkeys(core_matches + platform_matches + drive_matches))
+    if priority == "DROP":
         return {
-            "is_target": True,
-            "matched_keywords": matched,
-            "reason": "ship + drive combo matched",
+            "is_target": False,
+            "score": score,
+            "priority": priority,
+            "matched_keywords": matched_keywords,
+            "reason": "score below ABB marine-drive threshold",
+            "detail": {
+                "gateKeywords": gate_matches,
+                "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
+                "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
+                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
+                "excludeKeywords": exclude_hits,
+            },
         }
 
     return {
-        "is_target": False,
-        "matched_keywords": [],
-        "reason": "not marine-drive relevant",
+        "is_target": True,
+        "score": score,
+        "priority": priority,
+        "matched_keywords": matched_keywords,
+        "reason": "ABB marine-drive scoring passed",
+        "detail": {
+            "gateKeywords": gate_matches,
+            "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
+            "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
+            "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
+            "excludeKeywords": exclude_hits,
+        },
     }
 
 
@@ -315,16 +465,20 @@ class BaseCollector:
         shipyard = pick_first(raw, ["mkerNm", "cnstrCmpnyNm", "shipyard"])
         keyword_text = " ".join([str(v) for v in raw.values() if v is not None])
 
-        relevance = evaluate_ship_relevance(keyword_text, self.source_type)
-        matched_keywords = relevance["matched_keywords"]
-        ship_related = relevance["is_target"]
+        relevance = evaluate_ship_relevance(
+            title_text=name or "",
+            company_text=company or "",
+            full_text=keyword_text,
+            source_type=self.source_type,
+        )
 
-        if not ship_related:
+        if not relevance["is_target"]:
             logger.info(
-                "[FILTERED] collector=%s operation=%s reason=%s title=%s",
+                "[FILTERED] collector=%s operation=%s reason=%s score=%s title=%s",
                 self.name,
                 operation_name,
                 relevance.get("reason"),
+                relevance.get("score"),
                 (name or "")[:120],
             )
             return None
@@ -332,6 +486,16 @@ class BaseCollector:
         dedupe_key = announcement_no or contract_no or project_no or (name or "")
         if not dedupe_key:
             return None
+
+        abb_meta = {
+            "score": relevance["score"],
+            "priority": relevance["priority"],
+            "reason": relevance["reason"],
+            "detail": relevance["detail"],
+        }
+        raw_payload = dict(raw)
+        raw_payload["_abbTargeting"] = abb_meta
+
         return {
             "id": str(uuid.uuid4()),
             "dedupeKey": f"{self.name}:{dedupe_key}",
@@ -350,16 +514,16 @@ class BaseCollector:
             "sourceType": self.source_type,
             "sourceService": self.name,
             "sourceOperation": operation_name,
-            "verificationStatus": "COLLECTED",
-            "matchedKeywords": matched_keywords,
+            "verificationStatus": relevance["priority"],
+            "matchedKeywords": relevance["matched_keywords"],
             "keywordText": keyword_text,
-            "rawPayload": raw,
+            "rawPayload": raw_payload,
             "history": [
                 {
                     "id": str(uuid.uuid4()),
                     "date": now_iso(),
                     "action": "COLLECTED",
-                    "detail": f"{self.name}/{operation_name} 수집"
+                    "detail": f"{self.name}/{operation_name} 수집 | ABB score={relevance['score']} priority={relevance['priority']}"
                 }
             ],
             "sources": [
