@@ -1,21 +1,23 @@
 services:
   - type: web
-    name: abb-sdi-dashboard
-    runtime: python
+    name: friendly-disco
+    env: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     autoDeploy: true
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: ALLOWED_ORIGINS
+        value: https://marinesales.netlify.app,http://localhost:8000,http://127.0.0.1:8000
+      - key: COLLECT_TASK_TIMEOUT_SECONDS
+        value: 180
       - key: DATABASE_URL
         sync: false
-      - key: DATA_GO_KR_API_KEY
+      - key: PUBLIC_DATA_API_KEY
         sync: false
-      - key: SHIP_SUPPORT_VSSL_NAMES
+      - key: SUPABASE_URL
         sync: false
-      - key: SHIP_OPERATION_PORT_CODES
+      - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: INCHEON_PORT_API_KEY
-        sync: false
-      - key: PORT
-        value: 10000
