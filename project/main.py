@@ -85,7 +85,56 @@ def new_collect_job() -> Dict[str, Any]:
 
 COLLECT_JOB: Dict[str, Any] = new_collect_job()
 COLLECT_TASK: Optional[asyncio.Task] = None
-COLLECT_TASK_TIMEOUT_SECONDS = int(os.getenv("COLLECT_TASK_TIMEOUT_SECONDS", "180"))
+COLLECT_TASK_TIMEOUT_SECONDS = int(os.getenv("COLLECT_TASK_TIMEOUT_SECONDS", "120"))
+DEFAULT_PIPELINE_ALIASES = [x.strip() for x in os.getenv("DEFAULT_PIPELINE_ALIASES", "bid,contract,prespec,public_data,ship_support").split(",") if x.strip()]
+DISPLAY_MARINE_KEYWORDS = ["선박", "함정", "조선소", "해양", "해군", "해경", "항만", "ship", "vessel", "marine", "naval", "shipyard", "offshore", "경비함", "예인선", "순시선", "병원선"]
+DISPLAY_EXCLUDE_KEYWORDS = ["정수장", "해수담수화", "혈액투석", "의약품", "학교", "체육관", "냉난방", "하수", "상수", "배수개선", "아스콘", "마네킹", "농업", "교량", "도로", "터널"]
+
+
+def normalize_display_text(value: Any) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def contains_any_keyword(value: str, keywords: List[str]) -> bool:
+    norm = normalize_display_text(value)
+    return any(keyword.lower() in norm for keyword in keywords)
+
+
+def extract_abb_meta(raw_payload: Dict[str, Any]) -> Dict[str, Any]:
+    meta = (raw_payload or {}).get("_abbTargeting") or {}
+    detail = meta.get("detail") or {}
+    component = detail.get("componentScores") or {}
+    return {
+        "score": int(meta.get("score") or 0),
+        "priority": meta.get("priority") or "DROP",
+        "gateKeywords": detail.get("gateKeywords") or [],
+        "buyerKeywords": detail.get("buyerKeywords") or [],
+        "equipmentKeywords": detail.get("equipmentKeywords") or [],
+        "excludeKeywords": detail.get("excludeKeywords") or [],
+        "driveScore": int(component.get("driveScore") or 0),
+        "motorScore": int(component.get("motorScore") or 0),
+        "powerScore": int(component.get("powerScore") or 0),
+    }
+
+
+def should_display_project(project: Dict[str, Any]) -> bool:
+    if project.get("sourceType") == "SHIP":
+        return True
+    title = project.get("name") or ""
+    company = project.get("company") or ""
+    abb = extract_abb_meta(project.get("rawPayload") or {})
+    has_gate = bool(abb.get("gateKeywords")) or contains_any_keyword(title, DISPLAY_MARINE_KEYWORDS) or contains_any_keyword(company, DISPLAY_MARINE_KEYWORDS)
+    hard_excluded = contains_any_keyword(title, DISPLAY_EXCLUDE_KEYWORDS)
+    if hard_excluded and not has_gate:
+        return False
+    if abb.get("priority") in {"HOT", "WARM", "WATCH"} and abb.get("score", 0) >= 45 and has_gate:
+        return True
+    return has_gate and not hard_excluded
+
+
+def get_pipeline_aliases(registry: Dict[str, Any]) -> List[str]:
+    aliases = [alias for alias in DEFAULT_PIPELINE_ALIASES if alias in registry]
+    return aliases or [alias for alias in registry.keys() if alias != "incheon_port"]
 
 
 def start_collect_job(mode: str, collector_alias: Optional[str] = None) -> Dict[str, Any]:
@@ -296,6 +345,9 @@ def write_run_log(collector_name: str, status: str, collected_count: int, respon
 
 
 def row_to_project(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw_payload = row.get("raw_payload") or {}
+    abb_meta = extract_abb_meta(raw_payload)
+    order_value = row.get("order_value") or raw_payload.get("presmptPrce") or raw_payload.get("asignBdgtAmt") or raw_payload.get("totPrdprc")
     return {
         "id": row["id"],
         "name": row.get("name") or "이름없음",
@@ -304,7 +356,7 @@ def row_to_project(row: Dict[str, Any]) -> Dict[str, Any]:
         "contractNo": row.get("contract_no"),
         "projectNo": row.get("project_no"),
         "region": row.get("region"),
-        "orderValue": row.get("order_value"),
+        "orderValue": order_value,
         "currency": row.get("currency") or "KRW",
         "registeredAt": row.get("registered_at"),
         "contractDate": row.get("contract_date"),
@@ -313,12 +365,21 @@ def row_to_project(row: Dict[str, Any]) -> Dict[str, Any]:
         "sourceType": row.get("source_type"),
         "sourceService": row.get("source_service"),
         "sourceOperation": row.get("source_operation"),
-        "verificationStatus": row.get("verification_status") or "COLLECTED",
+        "verificationStatus": row.get("verification_status") or abb_meta.get("priority") or "COLLECTED",
         "matchedKeywords": row.get("matched_keywords") or [],
         "keywordText": row.get("keyword_text") or "",
-        "rawPayload": row.get("raw_payload") or {},
+        "rawPayload": raw_payload,
         "history": row.get("history") or [],
         "sources": row.get("sources") or [],
+        "abbScore": abb_meta.get("score", 0),
+        "abbPriority": abb_meta.get("priority", "DROP"),
+        "driveScore": abb_meta.get("driveScore", 0),
+        "motorScore": abb_meta.get("motorScore", 0),
+        "powerScore": abb_meta.get("powerScore", 0),
+        "marineGateKeywords": abb_meta.get("gateKeywords", []),
+        "buyerKeywords": abb_meta.get("buyerKeywords", []),
+        "equipmentKeywords": abb_meta.get("equipmentKeywords", []),
+        "excludeKeywords": abb_meta.get("excludeKeywords", []),
     }
 
 
@@ -352,8 +413,10 @@ def fetch_projects_from_db(q: str = "") -> Dict[str, Any]:
                 log_row = cur.fetchone()
                 if log_row:
                     last_collected_at = str(log_row["created_at"])
+                projects = [row_to_project(row) for row in rows]
+                projects = [project for project in projects if should_display_project(project)]
                 return {
-                    "projects": [row_to_project(row) for row in rows],
+                    "projects": projects,
                     "lastCollectedAt": last_collected_at,
                 }
     except Exception as exc:
@@ -379,16 +442,7 @@ async def execute_pipeline() -> Dict[str, Any]:
     registry = make_registry()
     all_projects: List[Dict[str, Any]] = []
 
-    ordered_aliases = [
-        "bid",
-        "contract",
-        "award",
-        "order_plan",
-        "prespec",
-        "public_data",
-        "ship_support",
-        "ship_operation",
-    ]
+    ordered_aliases = get_pipeline_aliases(registry)
 
     for alias in ordered_aliases:
         collector = registry[alias]
@@ -411,16 +465,7 @@ async def execute_pipeline_in_background(job_id: str) -> None:
     all_projects: List[Dict[str, Any]] = []
     processed_count = 0
 
-    ordered_aliases = [
-        "bid",
-        "contract",
-        "award",
-        "order_plan",
-        "prespec",
-        "public_data",
-        "ship_support",
-        "ship_operation",
-    ]
+    ordered_aliases = get_pipeline_aliases(registry)
 
     try:
         for alias in ordered_aliases:
