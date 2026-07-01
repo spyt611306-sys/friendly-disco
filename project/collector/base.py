@@ -14,7 +14,7 @@ logger = logging.getLogger("sdi.collector")
 
 # 1) 해양/선박 필수 게이트 키워드
 REQUIRED_MARINE_GATE_KEYWORDS = [
-    "선박", "함정", "함선", "조선소", "조선", "해양", "해군", "해경", "해양경찰",
+    "선박", "함정", "함선", "조선소", "해양", "해군", "해경", "해양경찰",
     "ship", "vessel", "shipyard", "shipbuilding", "marine", "naval", "coast guard",
     "offshore", "항만", "관공선", "경비함", "순시선", "예인선", "부선"
 ]
@@ -132,6 +132,33 @@ NON_MARINE_EXCLUDE_KEYWORDS: Dict[str, int] = {
 }
 
 
+TITLE_HARD_EXCLUDE_KEYWORDS = [
+    "정수장", "해수담수화", "혈액투석", "의약품", "체육관", "냉난방", "학교", "하수", "상수",
+    "배수개선", "아스콘", "마네킹", "농업", "엘리베이터", "병원", "도로", "교량", "터널"
+]
+
+ABB_DRIVE_KEYWORDS: Dict[str, int] = {
+    "드라이브": 24, "vfd": 26, "vf drive": 26, "variable frequency drive": 28,
+    "주파수변환장치": 28, "frequency converter": 28, "전력변환장치": 26, "power converter": 24,
+    "컨버터": 20, "인버터": 18, "전기추진": 20, "electric propulsion": 20, "propulsion": 10
+}
+
+ABB_MOTOR_KEYWORDS: Dict[str, int] = {
+    "모터": 16, "전동기": 18, "추진모터": 22, "추진전동기": 24, "propulsion motor": 22,
+    "shaft generator": 16, "thruster": 16, "azimuth thruster": 18
+}
+
+ABB_POWER_KEYWORDS: Dict[str, int] = {
+    "배터리": 16, "battery": 16, "ess": 16, "energy storage system": 18,
+    "pcs": 18, "pto": 14, "pti": 16, "hybrid": 18, "하이브리드": 18
+}
+
+def get_env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
 def now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
@@ -247,11 +274,12 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
     company_norm = normalize_text(company_text)
     full_norm = normalize_text(full_text)
 
-    gate_matches = find_keyword_matches(full_norm, REQUIRED_MARINE_GATE_KEYWORDS)
+    title_gate_matches = find_keyword_matches(title_norm, REQUIRED_MARINE_GATE_KEYWORDS)
+    company_gate_matches = find_keyword_matches(company_norm, REQUIRED_MARINE_GATE_KEYWORDS)
+    gate_matches = unique_keep_order(title_gate_matches + company_gate_matches)
+    hard_title_excludes = find_keyword_matches(title_norm, TITLE_HARD_EXCLUDE_KEYWORDS)
 
-    # SHIP 계열은 우선 통과하되 스코어는 그대로 계산
     ship_source_bonus = 20 if source_type == "SHIP" else 0
-
     exclude_score, exclude_hits = weighted_hits(full_norm, NON_MARINE_EXCLUDE_KEYWORDS)
 
     buyer_title_score, buyer_title_hits = weighted_hits(title_norm, ABB_BUYER_KEYWORDS)
@@ -264,58 +292,65 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
     platform_title_score, platform_title_hits = weighted_hits(title_norm, SHIP_PLATFORM_KEYWORDS)
     platform_full_score, platform_full_hits = weighted_hits(full_norm, SHIP_PLATFORM_KEYWORDS)
 
-    # 제목/기관명 일치 가중치 강화
-    score = 0
-    score += ship_source_bonus
-    score += buyer_title_score * 2
-    score += buyer_company_score * 2
-    score += max(0, buyer_full_score - buyer_title_score - buyer_company_score)
-    score += equip_title_score * 2
-    score += max(0, equip_full_score - equip_title_score)
-    score += platform_title_score * 2
-    score += max(0, platform_full_score - platform_title_score)
+    drive_title_score, drive_title_hits = weighted_hits(title_norm, ABB_DRIVE_KEYWORDS)
+    drive_full_score, drive_full_hits = weighted_hits(full_norm, ABB_DRIVE_KEYWORDS)
+    motor_title_score, motor_title_hits = weighted_hits(title_norm, ABB_MOTOR_KEYWORDS)
+    motor_full_score, motor_full_hits = weighted_hits(full_norm, ABB_MOTOR_KEYWORDS)
+    power_title_score, power_title_hits = weighted_hits(title_norm, ABB_POWER_KEYWORDS)
+    power_full_score, power_full_hits = weighted_hits(full_norm, ABB_POWER_KEYWORDS)
 
-    # 조합 보너스
-    has_marine_gate = bool(gate_matches)
+    has_strong_gate = bool(gate_matches) or source_type == "SHIP"
     has_equipment = bool(equip_title_hits or equip_full_hits)
     has_buyer = bool(buyer_title_hits or buyer_company_hits or buyer_full_hits)
     has_platform = bool(platform_title_hits or platform_full_hits)
 
-    if has_marine_gate and has_equipment:
-        score += 18
-    if has_buyer and has_equipment:
-        score += 14
-    if ("하이브리드" in full_norm or "hybrid" in full_norm) and ("전기추진" in full_norm or "electric propulsion" in full_norm or "드라이브" in full_norm or "vfd" in full_norm):
-        score += 16
-    if ("배터리" in full_norm or "battery" in full_norm or "ess" in full_norm) and ("선박" in full_norm or "ship" in full_norm or "vessel" in full_norm):
-        score += 12
-
-    # 비해양 산업 문맥 감점
-    if exclude_hits and not has_marine_gate:
-        score -= exclude_score
-    elif exclude_hits:
-        score -= int(exclude_score * 0.35)
-
-    # 필수 게이트: 해경/해군/조선소/선박 계열 문맥이 하나 이상 있어야 함
-    if source_type != "SHIP" and not has_marine_gate:
+    if hard_title_excludes and source_type != "SHIP" and not gate_matches:
         return {
             "is_target": False,
             "score": 0,
             "priority": "DROP",
             "matched_keywords": [],
-            "reason": "required marine gate keyword missing",
-            "detail": {
-                "gateKeywords": gate_matches,
-                "excludeKeywords": exclude_hits,
-            },
+            "reason": "title hard-excluded as non-marine",
+            "detail": {"gateKeywords": gate_matches, "excludeKeywords": unique_keep_order(exclude_hits + hard_title_excludes), "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0}},
         }
+
+    if source_type != "SHIP" and not gate_matches:
+        return {
+            "is_target": False,
+            "score": 0,
+            "priority": "DROP",
+            "matched_keywords": [],
+            "reason": "required marine gate keyword missing in title/company",
+            "detail": {"gateKeywords": gate_matches, "excludeKeywords": exclude_hits, "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0}},
+        }
+
+    score = ship_source_bonus
+    score += buyer_title_score * 2 + buyer_company_score * 2 + max(0, buyer_full_score - buyer_title_score - buyer_company_score)
+    score += equip_title_score * 2 + max(0, equip_full_score - equip_title_score)
+    score += platform_title_score * 2 + max(0, platform_full_score - platform_title_score)
+    if has_strong_gate and has_equipment:
+        score += 18
+    if has_buyer and has_equipment:
+        score += 14
+    if has_platform and has_equipment:
+        score += 10
+
+    if exclude_hits and not gate_matches:
+        score -= exclude_score
+    elif exclude_hits:
+        score -= int(exclude_score * 0.45)
+
+    drive_score = drive_title_score * 2 + max(0, drive_full_score - drive_title_score)
+    motor_score = motor_title_score * 2 + max(0, motor_full_score - motor_title_score)
+    power_score = power_title_score * 2 + max(0, power_full_score - power_title_score)
+    if has_strong_gate:
+        drive_score += 8 if drive_score else 0
+        motor_score += 8 if motor_score else 0
+        power_score += 6 if power_score else 0
 
     priority = classify_priority(score)
     matched_keywords = unique_keep_order(
-        gate_matches
-        + buyer_title_hits + buyer_company_hits + buyer_full_hits
-        + equip_title_hits + equip_full_hits
-        + platform_title_hits + platform_full_hits
+        gate_matches + buyer_title_hits + buyer_company_hits + buyer_full_hits + equip_title_hits + equip_full_hits + platform_title_hits + platform_full_hits
     )
 
     if priority == "DROP":
@@ -330,7 +365,8 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
                 "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
                 "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
                 "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
-                "excludeKeywords": exclude_hits,
+                "excludeKeywords": unique_keep_order(exclude_hits + hard_title_excludes),
+                "componentScores": {"driveScore": drive_score, "motorScore": motor_score, "powerScore": power_score},
             },
         }
 
@@ -345,7 +381,8 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
             "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
             "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
             "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
-            "excludeKeywords": exclude_hits,
+            "excludeKeywords": unique_keep_order(exclude_hits + hard_title_excludes),
+            "componentScores": {"driveScore": drive_score, "motorScore": motor_score, "powerScore": power_score},
         },
     }
 
@@ -420,6 +457,8 @@ class BaseCollector:
         page_no = 1
         num_rows = safe_int(base_params.get("numOfRows"), self.default_num_rows)
         all_items: List[Dict[str, Any]] = []
+        max_pages = get_env_int("MAX_PAGES_PER_OPERATION", 3)
+        max_items = get_env_int("MAX_ITEMS_PER_OPERATION", 300)
         while True:
             params = dict(base_params)
             params["pageNo"] = page_no
@@ -434,6 +473,10 @@ class BaseCollector:
             if total_count and len(all_items) >= total_count:
                 break
             if len(items) < num_rows:
+                break
+            if max_pages and page_no >= max_pages:
+                break
+            if max_items and len(all_items) >= max_items:
                 break
             page_no += 1
         logger.info("[PAGE-END] collector=%s operation=%s total=%s", self.name, operation_name, len(all_items))
@@ -453,7 +496,7 @@ class BaseCollector:
         region = pick_first(raw, ["prtcptPsblRgnNm", "cnstwkRgnNm", "insttLctNm", "rgnNm", "prtAgNm"])
         order_value = pick_first(raw, [
             "sumOrderAmt", "orderContrctAmt", "cntrctAmt", "fnlSucsfAmt", "sucsfbidAmt", "bssamt",
-            "sumOrderDolAmt", "totAmt", "totPrdprc"
+            "sumOrderDolAmt", "totAmt", "totPrdprc", "presmptPrce", "asignBdgtAmt", "presmptPrce"
         ])
         currency = "USD" if pick_first(raw, ["sumOrderDolAmt"]) else "KRW"
         registered_at = pick_first(raw, [
@@ -495,6 +538,7 @@ class BaseCollector:
         }
         raw_payload = dict(raw)
         raw_payload["_abbTargeting"] = abb_meta
+        raw_payload["_displayHint"] = {"score": relevance["score"], "priority": relevance["priority"], "matchedKeywords": relevance["matched_keywords"]}
 
         return {
             "id": str(uuid.uuid4()),

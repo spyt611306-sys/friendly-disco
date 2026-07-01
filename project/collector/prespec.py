@@ -1,7 +1,8 @@
+import os
 from datetime import date, timedelta
 from typing import Dict, List
 
-from .base import BaseCollector, chunk_days
+from .base import BaseCollector, chunk_days, get_env_int
 
 
 PRESPEC_OPERATION_NAMES = [
@@ -37,14 +38,9 @@ class PrespecCollector(BaseCollector):
 
     async def collect(self, seed_projects: List[Dict[str, str]] | None = None) -> List[Dict[str, str]]:
         end_day = date.today()
-        start_day = end_day - timedelta(days=6)
+        start_day = end_day - timedelta(days=get_env_int("PRESPEC_LOOKBACK_DAYS", 2) - 1)
         windows = chunk_days(start_day, end_day, 1)
-        target_ops = [
-            "getPublicPrcureThngInfoThng",
-            "getPublicPrcureThngInfoFrgcpt",
-            "getPublicPrcureThngInfoServc",
-            "getPublicPrcureThngInfoCnstwk",
-        ]
+        target_ops = [x.strip() for x in os.getenv("PRESPEC_TARGET_OPS", "getPublicPrcureThngInfoThng,getPublicPrcureThngInfoServc").split(",") if x.strip()]
         results: List[Dict[str, str]] = []
         for operation_name in target_ops:
             for left, right in windows:

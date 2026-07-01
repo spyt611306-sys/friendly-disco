@@ -1,7 +1,8 @@
+import os
 from datetime import date, timedelta
 from typing import Any, Dict, List
 
-from .base import BaseCollector, chunk_days
+from .base import BaseCollector, chunk_days, get_env_int
 
 
 AWARD_OPERATION_NAMES = [
@@ -40,14 +41,9 @@ class AwardCollector(BaseCollector):
 
     async def collect(self, seed_projects: List[Dict[str, Any]] | None = None) -> List[Dict[str, Any]]:
         end_day = date.today()
-        start_day = end_day - timedelta(days=6)
+        start_day = end_day - timedelta(days=get_env_int("AWARD_LOOKBACK_DAYS", 1) - 1)
         windows = chunk_days(start_day, end_day, 1)
-        target_ops = [
-            "getScsbidListSttusThng",
-            "getScsbidListSttusCnstwk",
-            "getScsbidListSttusServc",
-            "getScsbidListSttusFrgcpt",
-        ]
+        target_ops = [x.strip() for x in os.getenv("AWARD_TARGET_OPS", "getScsbidListSttusThng").split(",") if x.strip()]
         results: List[Dict[str, Any]] = []
         for operation_name in target_ops:
             for left, right in windows:
