@@ -35,6 +35,47 @@ ABB_BUYER_KEYWORDS: Dict[str, int] = {
     "관공선": 18,
     "방위사업청": 20,
     "함정": 22,
+    "지방자치단체": 18,
+    "제주특별자치도": 20,
+    "전라북도": 16,
+    "전라남도": 16,
+    "경상남도": 16,
+    "군산대학교": 18,
+    "수산자원연구": 14,
+    "어업지도선": 18,
+    "행정선": 20,
+    "청항선": 20,
+}
+
+MID_SMALL_SHIPYARD_DEFAULTS = [
+    "금하네이벌텍", "Kumha Naval Tech", "동남중공업", "삼원중공업", "유일", "대양", "코리아월드써비스",
+    "신진조선", "부원", "대선조선", "HJ중공업", "에이치제이중공업", "대한조선", "세진중공업",
+    "조선소", "shipyard"
+]
+
+VESSEL_BUILD_KEYWORDS: Dict[str, int] = {
+    "건조": 24,
+    "대체건조": 30,
+    "신조": 26,
+    "제작구매": 20,
+    "제조구매": 18,
+    "구매설치": 10,
+    "개조": 16,
+    "성능개량": 16,
+    "전기추진": 24,
+    "하이브리드 전기추진": 28,
+    "친환경선박": 22,
+    "관공선 건조": 32,
+    "행정선 건조": 32,
+    "차도선 건조": 34,
+    "실습선 건조": 34,
+    "청항선 건조": 34,
+    "순시선 건조": 34,
+    "경비함 건조": 34,
+    "research vessel": 18,
+    "training ship": 20,
+    "government vessel": 18,
+    "electric propulsion": 22,
 }
 
 # 3) ABB 관심 장비/솔루션 문맥
@@ -197,6 +238,21 @@ def get_env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
+
+def get_env_terms(name: str, defaults: Optional[List[str]] = None) -> List[str]:
+    raw = os.getenv(name, "")
+    values = [x.strip() for x in raw.split(",") if x.strip()]
+    merged = list(defaults or []) + values
+    seen = set()
+    result: List[str] = []
+    for value in merged:
+        key = value.lower()
+        if key not in seen:
+            seen.add(key)
+            result.append(value)
+    return result
+
+
 def now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
@@ -299,7 +355,18 @@ def unique_keep_order(values: List[str]) -> List[str]:
 
 def watchlist_hits(text: str) -> List[str]:
     normalized = normalize_text(text)
-    return [term for term in WATCHLIST_TERMS if term.lower() in normalized]
+    terms = get_env_terms("SHIP_WATCHLIST_TERMS", WATCHLIST_TERMS)
+    return [term for term in terms if term.lower() in normalized]
+
+
+def shipyard_hits(text: str) -> List[str]:
+    normalized = normalize_text(text)
+    shipyards = get_env_terms("SHIPYARD_WATCHLIST", MID_SMALL_SHIPYARD_DEFAULTS)
+    return [term for term in shipyards if term.lower() in normalized]
+
+
+def build_keyword_hits(text: str) -> List[str]:
+    return find_keyword_matches(text, VESSEL_BUILD_KEYWORDS.keys())
 
 
 def classify_priority(score: int) -> str:
@@ -322,6 +389,11 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
     gate_matches = unique_keep_order(title_gate_matches + company_gate_matches)
     hard_title_excludes = find_keyword_matches(title_norm, TITLE_HARD_EXCLUDE_KEYWORDS)
     watch_hits = watchlist_hits(full_norm)
+    shipyard_title_hits = shipyard_hits(title_norm)
+    shipyard_company_hits = shipyard_hits(company_norm)
+    shipyard_full_hits = shipyard_hits(full_norm)
+    build_title_hits = build_keyword_hits(title_norm)
+    build_full_hits = build_keyword_hits(full_norm)
 
     ship_source_bonus = 28 if source_type == "SHIP" else 0
     exclude_score, exclude_hits = weighted_hits(full_norm, NON_MARINE_EXCLUDE_KEYWORDS)
@@ -336,6 +408,8 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
 
     platform_title_score, platform_title_hits = weighted_hits(title_norm, SHIP_PLATFORM_KEYWORDS)
     platform_full_score, platform_full_hits = weighted_hits(full_norm, SHIP_PLATFORM_KEYWORDS)
+    build_title_score, _ = weighted_hits(title_norm, VESSEL_BUILD_KEYWORDS)
+    build_full_score, _ = weighted_hits(full_norm, VESSEL_BUILD_KEYWORDS)
 
     drive_title_score, drive_title_hits = weighted_hits(title_norm, ABB_DRIVE_KEYWORDS)
     drive_full_score, drive_full_hits = weighted_hits(full_norm, ABB_DRIVE_KEYWORDS)
@@ -346,9 +420,11 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
 
     has_equipment = bool(equip_title_hits or equip_full_hits or drive_title_hits or drive_full_hits or motor_title_hits or motor_full_hits or power_title_hits or power_full_hits)
     has_buyer = bool(buyer_title_hits or buyer_company_hits or buyer_full_hits)
-    has_platform = bool(platform_title_hits or platform_full_hits or title_gate_matches or watch_hits or source_type == "SHIP")
-    buyer_only = has_buyer and not has_platform and not has_equipment
-    generic_supply_only = bool(commodity_exclude_hits) and not has_platform and source_type != "SHIP" and not watch_hits
+    has_shipyard = bool(shipyard_title_hits or shipyard_company_hits or shipyard_full_hits)
+    has_build_context = bool(build_title_hits or build_full_hits)
+    has_platform = bool(platform_title_hits or platform_full_hits or title_gate_matches or watch_hits or source_type == "SHIP" or (has_shipyard and has_build_context))
+    buyer_only = has_buyer and not has_platform and not has_equipment and not has_shipyard
+    generic_supply_only = bool(commodity_exclude_hits) and not has_platform and source_type != "SHIP" and not watch_hits and not has_shipyard
 
     if buyer_only:
         return {
@@ -362,6 +438,8 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
                 "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
                 "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
                 "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + watch_hits),
+                "shipyardKeywords": unique_keep_order(shipyard_title_hits + shipyard_company_hits + shipyard_full_hits),
+                "buildKeywords": unique_keep_order(build_title_hits + build_full_hits),
                 "watchlistHits": watch_hits,
                 "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
                 "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
@@ -380,13 +458,15 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
                 "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
                 "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
                 "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + watch_hits),
+                "shipyardKeywords": unique_keep_order(shipyard_title_hits + shipyard_company_hits + shipyard_full_hits),
+                "buildKeywords": unique_keep_order(build_title_hits + build_full_hits),
                 "watchlistHits": watch_hits,
                 "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
                 "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
             },
         }
 
-    if hard_title_excludes and source_type != "SHIP" and not has_platform:
+    if hard_title_excludes and source_type != "SHIP" and not has_platform and not has_shipyard:
         return {
             "is_target": False,
             "score": 0,
@@ -398,24 +478,28 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
                 "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
                 "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
                 "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + watch_hits),
+                "shipyardKeywords": unique_keep_order(shipyard_title_hits + shipyard_company_hits + shipyard_full_hits),
+                "buildKeywords": unique_keep_order(build_title_hits + build_full_hits),
                 "watchlistHits": watch_hits,
                 "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
                 "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
             },
         }
 
-    if source_type != "SHIP" and not has_platform:
+    if source_type != "SHIP" and not has_platform and not (has_shipyard and has_build_context):
         return {
             "is_target": False,
             "score": 0,
             "priority": "DROP",
             "matched_keywords": [],
-            "reason": "ship/platform keyword missing in title/company",
+            "reason": "ship/platform or shipyard-build context missing",
             "detail": {
                 "gateKeywords": gate_matches,
                 "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
                 "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
                 "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + watch_hits),
+                "shipyardKeywords": unique_keep_order(shipyard_title_hits + shipyard_company_hits + shipyard_full_hits),
+                "buildKeywords": unique_keep_order(build_title_hits + build_full_hits),
                 "watchlistHits": watch_hits,
                 "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits),
                 "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
@@ -426,8 +510,13 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
     score += platform_title_score * 3 + max(0, platform_full_score - platform_title_score)
     score += buyer_title_score + buyer_company_score + max(0, buyer_full_score - buyer_title_score - buyer_company_score)
     score += equip_title_score * 2 + max(0, equip_full_score - equip_title_score)
+    score += build_title_score * 2 + max(0, build_full_score - build_title_score)
+    score += 16 * len(unique_keep_order(shipyard_title_hits + shipyard_company_hits))
+    score += 8 * max(0, len(unique_keep_order(shipyard_full_hits)) - len(unique_keep_order(shipyard_title_hits + shipyard_company_hits)))
     if watch_hits:
         score += 60
+    if has_shipyard and has_build_context:
+        score += 28
     if has_platform and has_equipment:
         score += 18
     if has_platform and has_buyer:
@@ -437,7 +526,7 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
 
     if exclude_hits:
         score -= int(exclude_score * 0.35)
-    if commodity_exclude_hits and not has_equipment and not watch_hits:
+    if commodity_exclude_hits and not has_equipment and not watch_hits and not has_shipyard:
         score -= commodity_exclude_score
     elif commodity_exclude_hits and not watch_hits:
         score -= int(commodity_exclude_score * 0.5)
@@ -445,14 +534,14 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
     drive_score = drive_title_score * 2 + max(0, drive_full_score - drive_title_score)
     motor_score = motor_title_score * 2 + max(0, motor_full_score - motor_title_score)
     power_score = power_title_score * 2 + max(0, power_full_score - power_title_score)
-    if has_platform:
+    if has_platform or has_shipyard:
         drive_score += 8 if drive_score else 0
         motor_score += 8 if motor_score else 0
         power_score += 6 if power_score else 0
 
     priority = classify_priority(score)
     matched_keywords = unique_keep_order(
-        gate_matches + watch_hits + platform_title_hits + platform_full_hits + buyer_title_hits + buyer_company_hits + buyer_full_hits + equip_title_hits + equip_full_hits
+        gate_matches + watch_hits + platform_title_hits + platform_full_hits + shipyard_title_hits + shipyard_company_hits + shipyard_full_hits + build_title_hits + build_full_hits + buyer_title_hits + buyer_company_hits + buyer_full_hits + equip_title_hits + equip_full_hits
     )
 
     detail = {
@@ -460,6 +549,8 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
         "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
         "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
         "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + title_gate_matches + watch_hits),
+        "shipyardKeywords": unique_keep_order(shipyard_title_hits + shipyard_company_hits + shipyard_full_hits),
+        "buildKeywords": unique_keep_order(build_title_hits + build_full_hits),
         "watchlistHits": watch_hits,
         "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
         "componentScores": {"driveScore": drive_score, "motorScore": motor_score, "powerScore": power_score},
@@ -658,6 +749,10 @@ class BaseCollector:
         raw_payload = dict(raw)
         raw_payload["_abbTargeting"] = abb_meta
         raw_payload["_displayHint"] = {"score": relevance["score"], "priority": relevance["priority"], "matchedKeywords": relevance["matched_keywords"]}
+        raw_payload["_marketHint"] = {
+            "shipyardKeywords": relevance["detail"].get("shipyardKeywords", []),
+            "buildKeywords": relevance["detail"].get("buildKeywords", []),
+        }
         raw_payload["_attachments"] = {"specDocUrls": spec_doc_urls}
         raw_payload["_verified"] = {
             "status": "UNVERIFIED",
