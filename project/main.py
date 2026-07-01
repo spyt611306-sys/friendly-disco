@@ -47,7 +47,7 @@ ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         "ALLOWED_ORIGINS",
-        "https://marinesales.netlify.app,http://localhost:8000,http://127.0.0.1:8000",
+        "https://marinesales.netlify.app,https://marinesalesbyminsu.netlify.app,http://localhost:8000,http://127.0.0.1:8000",
     ).split(",")
     if origin.strip()
 ]
@@ -86,9 +86,9 @@ def new_collect_job() -> Dict[str, Any]:
 COLLECT_JOB: Dict[str, Any] = new_collect_job()
 COLLECT_TASK: Optional[asyncio.Task] = None
 COLLECT_TASK_TIMEOUT_SECONDS = int(os.getenv("COLLECT_TASK_TIMEOUT_SECONDS", "120"))
-DEFAULT_PIPELINE_ALIASES = [x.strip() for x in os.getenv("DEFAULT_PIPELINE_ALIASES", "bid,contract,prespec,public_data,ship_support").split(",") if x.strip()]
-DISPLAY_MARINE_KEYWORDS = ["선박", "함정", "조선소", "해양", "해군", "해경", "항만", "ship", "vessel", "marine", "naval", "shipyard", "offshore", "경비함", "예인선", "순시선", "병원선"]
-DISPLAY_EXCLUDE_KEYWORDS = ["정수장", "해수담수화", "혈액투석", "의약품", "학교", "체육관", "냉난방", "하수", "상수", "배수개선", "아스콘", "마네킹", "농업", "교량", "도로", "터널"]
+DEFAULT_PIPELINE_ALIASES = [x.strip() for x in os.getenv("DEFAULT_PIPELINE_ALIASES", "bid,contract,prespec,ship_support,ship_operation").split(",") if x.strip()]
+DISPLAY_PLATFORM_KEYWORDS = ["선박", "함정", "함선", "실습선", "행정선", "청항선", "관공선", "경비함", "순시선", "예인선", "방제선", "3천톤", "3000톤", "3,000톤", "동해행정선", "군산실습선", "군산청항선", "ship", "vessel", "patrol vessel", "training ship", "government vessel", "shipyard", "dry dock", "dock"]
+DISPLAY_EXCLUDE_KEYWORDS = ["정수장", "해수담수화", "혈액투석", "의약품", "학교", "체육관", "냉난방", "하수", "상수", "배수개선", "아스콘", "마네킹", "농업", "교량", "도로", "터널", "청진기", "박스", "플랜지", "파이프", "압축가스"]
 
 
 def normalize_display_text(value: Any) -> str:
@@ -110,6 +110,7 @@ def extract_abb_meta(raw_payload: Dict[str, Any]) -> Dict[str, Any]:
         "gateKeywords": detail.get("gateKeywords") or [],
         "buyerKeywords": detail.get("buyerKeywords") or [],
         "equipmentKeywords": detail.get("equipmentKeywords") or [],
+        "platformKeywords": detail.get("platformKeywords") or [],
         "excludeKeywords": detail.get("excludeKeywords") or [],
         "driveScore": int(component.get("driveScore") or 0),
         "motorScore": int(component.get("motorScore") or 0),
@@ -123,13 +124,17 @@ def should_display_project(project: Dict[str, Any]) -> bool:
     title = project.get("name") or ""
     company = project.get("company") or ""
     abb = extract_abb_meta(project.get("rawPayload") or {})
-    has_gate = bool(abb.get("gateKeywords")) or contains_any_keyword(title, DISPLAY_MARINE_KEYWORDS) or contains_any_keyword(company, DISPLAY_MARINE_KEYWORDS)
+    has_platform = bool(abb.get("platformKeywords")) or contains_any_keyword(title, DISPLAY_PLATFORM_KEYWORDS) or contains_any_keyword(company, DISPLAY_PLATFORM_KEYWORDS)
+    has_buyer = bool(abb.get("buyerKeywords"))
+    has_equipment = bool(abb.get("equipmentKeywords")) or any(int(abb.get(k, 0) or 0) > 0 for k in ["driveScore", "motorScore", "powerScore"])
     hard_excluded = contains_any_keyword(title, DISPLAY_EXCLUDE_KEYWORDS)
-    if hard_excluded and not has_gate:
+    if hard_excluded and not has_platform:
         return False
-    if abb.get("priority") in {"HOT", "WARM", "WATCH"} and abb.get("score", 0) >= 45 and has_gate:
+    if has_platform and abb.get("priority") in {"HOT", "WARM", "WATCH"} and abb.get("score", 0) >= 45:
         return True
-    return has_gate and not hard_excluded
+    if has_platform and (has_buyer or has_equipment):
+        return True
+    return False
 
 
 def get_pipeline_aliases(registry: Dict[str, Any]) -> List[str]:
@@ -379,6 +384,7 @@ def row_to_project(row: Dict[str, Any]) -> Dict[str, Any]:
         "marineGateKeywords": abb_meta.get("gateKeywords", []),
         "buyerKeywords": abb_meta.get("buyerKeywords", []),
         "equipmentKeywords": abb_meta.get("equipmentKeywords", []),
+        "platformKeywords": abb_meta.get("platformKeywords", []),
         "excludeKeywords": abb_meta.get("excludeKeywords", []),
     }
 
