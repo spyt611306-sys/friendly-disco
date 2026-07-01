@@ -14,11 +14,11 @@ logger = logging.getLogger("sdi.collector")
 
 # 1) 해양/선박 필수 게이트 키워드
 REQUIRED_MARINE_GATE_KEYWORDS = [
-    "선박", "함정", "함선", "조선", "조선소", "실습선", "행정선", "청항선", "관공선",
-    "경비함", "순시선", "예인선", "방제선", "지원선", "부선", "경비정", "함정정비",
-    "3천톤", "3000톤", "3,000톤", "동해행정선", "군산실습선", "군산청항선",
+    "선박", "함정", "함선", "조선", "조선소", "실습선", "탐사실습선", "해양수산탐사실습선", "행정선", "청항선", "관공선",
+    "경비함", "순시선", "예인선", "방제선", "지원선", "부선", "경비정", "소방정", "차도선", "함정정비",
+    "3천톤", "3000톤", "3,000톤", "동해행정선", "군산실습선", "군산청항선", "우도차도선",
     "ship", "vessel", "patrol vessel", "training ship", "government vessel", "shipyard",
-    "shipbuilding", "dry dock", "dock", "offshore vessel", "coast guard vessel"
+    "shipbuilding", "dry dock", "dock", "offshore vessel", "coast guard vessel", "crew transfer vessel", "ctv"
 ]
 
 # 2) ABB 드라이브 기술영업 관점 우선 고객/발주처 문맥
@@ -96,6 +96,16 @@ SHIP_PLATFORM_KEYWORDS: Dict[str, int] = {
     "파일럿보트": 16,
     "pilot boat": 16,
     "crew boat": 16,
+    "차도선": 22,
+    "실습선": 24,
+    "탐사실습선": 26,
+    "행정선": 24,
+    "청항선": 24,
+    "관공선": 22,
+    "소방정": 22,
+    "ctv": 22,
+    "crew transfer vessel": 24,
+    "해양수산탐사실습선": 30,
 }
 
 # 5) 비해양 일반 산업 제외 문맥
@@ -148,6 +158,15 @@ GENERIC_SUPPLY_EXCLUDE_KEYWORDS: Dict[str, int] = {
     "폭발물": 18,
     "플라스틱": 16,
 }
+
+WATCHLIST_TERMS = [
+    "군산실습선", "해림2호", "우도차도선", "우도 차도선",
+    "해경청3000톤", "3000톤", "3천톤", "3019함", "3020함",
+    "동해행정선", "군산청항선", "소방청300t", "소방정",
+    "관공선", "실습선", "탐사실습선", "행정선", "청항선",
+    "순시선", "경비함", "하이브리드 전기추진", "전기추진",
+    "ctv", "crew transfer vessel", "말콘"
+]
 
 
 TITLE_HARD_EXCLUDE_KEYWORDS = [
@@ -278,6 +297,11 @@ def unique_keep_order(values: List[str]) -> List[str]:
     return result
 
 
+def watchlist_hits(text: str) -> List[str]:
+    normalized = normalize_text(text)
+    return [term for term in WATCHLIST_TERMS if term.lower() in normalized]
+
+
 def classify_priority(score: int) -> str:
     if score >= 85:
         return "HOT"
@@ -297,6 +321,7 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
     company_gate_matches = find_keyword_matches(company_norm, REQUIRED_MARINE_GATE_KEYWORDS)
     gate_matches = unique_keep_order(title_gate_matches + company_gate_matches)
     hard_title_excludes = find_keyword_matches(title_norm, TITLE_HARD_EXCLUDE_KEYWORDS)
+    watch_hits = watchlist_hits(full_norm)
 
     ship_source_bonus = 28 if source_type == "SHIP" else 0
     exclude_score, exclude_hits = weighted_hits(full_norm, NON_MARINE_EXCLUDE_KEYWORDS)
@@ -319,12 +344,11 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
     power_title_score, power_title_hits = weighted_hits(title_norm, ABB_POWER_KEYWORDS)
     power_full_score, power_full_hits = weighted_hits(full_norm, ABB_POWER_KEYWORDS)
 
-    has_gate = bool(gate_matches) or source_type == "SHIP"
     has_equipment = bool(equip_title_hits or equip_full_hits or drive_title_hits or drive_full_hits or motor_title_hits or motor_full_hits or power_title_hits or power_full_hits)
     has_buyer = bool(buyer_title_hits or buyer_company_hits or buyer_full_hits)
-    has_platform = bool(platform_title_hits or platform_full_hits or title_gate_matches)
+    has_platform = bool(platform_title_hits or platform_full_hits or title_gate_matches or watch_hits or source_type == "SHIP")
     buyer_only = has_buyer and not has_platform and not has_equipment
-    generic_supply_only = bool(commodity_exclude_hits) and not has_platform and source_type != "SHIP"
+    generic_supply_only = bool(commodity_exclude_hits) and not has_platform and source_type != "SHIP" and not watch_hits
 
     if buyer_only:
         return {
@@ -337,7 +361,8 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
                 "gateKeywords": gate_matches,
                 "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
                 "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
-                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
+                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + watch_hits),
+                "watchlistHits": watch_hits,
                 "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
                 "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
             },
@@ -354,7 +379,8 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
                 "gateKeywords": gate_matches,
                 "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
                 "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
-                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
+                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + watch_hits),
+                "watchlistHits": watch_hits,
                 "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
                 "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
             },
@@ -371,7 +397,8 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
                 "gateKeywords": gate_matches,
                 "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
                 "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
-                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
+                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + watch_hits),
+                "watchlistHits": watch_hits,
                 "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
                 "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
             },
@@ -388,7 +415,8 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
                 "gateKeywords": gate_matches,
                 "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
                 "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
-                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits),
+                "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + watch_hits),
+                "watchlistHits": watch_hits,
                 "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits),
                 "componentScores": {"driveScore": 0, "motorScore": 0, "powerScore": 0},
             },
@@ -398,6 +426,8 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
     score += platform_title_score * 3 + max(0, platform_full_score - platform_title_score)
     score += buyer_title_score + buyer_company_score + max(0, buyer_full_score - buyer_title_score - buyer_company_score)
     score += equip_title_score * 2 + max(0, equip_full_score - equip_title_score)
+    if watch_hits:
+        score += 60
     if has_platform and has_equipment:
         score += 18
     if has_platform and has_buyer:
@@ -407,9 +437,9 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
 
     if exclude_hits:
         score -= int(exclude_score * 0.35)
-    if commodity_exclude_hits and not has_equipment:
+    if commodity_exclude_hits and not has_equipment and not watch_hits:
         score -= commodity_exclude_score
-    elif commodity_exclude_hits:
+    elif commodity_exclude_hits and not watch_hits:
         score -= int(commodity_exclude_score * 0.5)
 
     drive_score = drive_title_score * 2 + max(0, drive_full_score - drive_title_score)
@@ -422,14 +452,15 @@ def evaluate_ship_relevance(title_text: str, company_text: str, full_text: str, 
 
     priority = classify_priority(score)
     matched_keywords = unique_keep_order(
-        gate_matches + platform_title_hits + platform_full_hits + buyer_title_hits + buyer_company_hits + buyer_full_hits + equip_title_hits + equip_full_hits
+        gate_matches + watch_hits + platform_title_hits + platform_full_hits + buyer_title_hits + buyer_company_hits + buyer_full_hits + equip_title_hits + equip_full_hits
     )
 
     detail = {
         "gateKeywords": gate_matches,
         "buyerKeywords": unique_keep_order(buyer_title_hits + buyer_company_hits + buyer_full_hits),
         "equipmentKeywords": unique_keep_order(equip_title_hits + equip_full_hits),
-        "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + title_gate_matches),
+        "platformKeywords": unique_keep_order(platform_title_hits + platform_full_hits + title_gate_matches + watch_hits),
+        "watchlistHits": watch_hits,
         "excludeKeywords": unique_keep_order(exclude_hits + commodity_exclude_hits + hard_title_excludes),
         "componentScores": {"driveScore": drive_score, "motorScore": motor_score, "powerScore": power_score},
     }
@@ -465,7 +496,20 @@ class BaseCollector:
     operations: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self) -> None:
-        self.service_key = os.getenv(self.key_env_name, "").strip()
+        self.service_key = self.resolve_service_key()
+
+    def resolve_service_key(self) -> str:
+        candidates = [
+            self.key_env_name,
+            "DATA_GO_KR_API_KEY",
+            "PUBLIC_DATA_API_KEY",
+            "SHIP_API_KEY",
+        ]
+        for env_name in candidates:
+            value = os.getenv(env_name, "").strip()
+            if value:
+                return value
+        return ""
 
     def ensure_key(self) -> None:
         if not self.service_key:
@@ -603,9 +647,23 @@ class BaseCollector:
             "reason": relevance["reason"],
             "detail": relevance["detail"],
         }
+        spec_doc_urls = [
+            raw.get("specDocFileUrl1"),
+            raw.get("specDocFileUrl2"),
+            raw.get("specDocFileUrl3"),
+            raw.get("specDocFileUrl4"),
+            raw.get("specDocFileUrl5"),
+        ]
+        spec_doc_urls = [url for url in spec_doc_urls if url]
         raw_payload = dict(raw)
         raw_payload["_abbTargeting"] = abb_meta
         raw_payload["_displayHint"] = {"score": relevance["score"], "priority": relevance["priority"], "matchedKeywords": relevance["matched_keywords"]}
+        raw_payload["_attachments"] = {"specDocUrls": spec_doc_urls}
+        raw_payload["_verified"] = {
+            "status": "UNVERIFIED",
+            "reason": "collector ingestion only",
+            "evidenceUrls": spec_doc_urls[:],
+        }
 
         return {
             "id": str(uuid.uuid4()),

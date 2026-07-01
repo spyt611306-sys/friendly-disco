@@ -23,7 +23,7 @@ class PublicDataCollector(BaseCollector):
         today = date.today()
         results: List[Dict[str, str]] = []
 
-        bid_start = today - timedelta(days=get_env_int("PUBLIC_DATA_LOOKBACK_DAYS", 2) - 1)
+        bid_start = today - timedelta(days=get_env_int("PUBLIC_DATA_LOOKBACK_DAYS", 30) - 1)
         bid_params = {
             "bidNtceBgnDt": bid_start.strftime("%Y%m%d") + "0000",
             "bidNtceEndDt": today.strftime("%Y%m%d") + "2359",
@@ -33,7 +33,7 @@ class PublicDataCollector(BaseCollector):
             if project:
                 results.append(project)
 
-        contract_start = today - timedelta(days=get_env_int("PUBLIC_DATA_LOOKBACK_DAYS", 2) - 1)
+        contract_start = today - timedelta(days=get_env_int("PUBLIC_DATA_LOOKBACK_DAYS", 30) - 1)
         contract_params = {
             "cntrctCnclsBgnDate": contract_start.strftime("%Y%m%d"),
             "cntrctCnclsEndDate": today.strftime("%Y%m%d"),

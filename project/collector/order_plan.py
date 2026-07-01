@@ -1,5 +1,5 @@
 import os
-from datetime import date
+from datetime import date, timedelta
 from typing import Dict, List
 
 from .base import BaseCollector
@@ -26,7 +26,10 @@ class OrderPlanCollector(BaseCollector):
 
     async def collect(self, seed_projects: List[Dict[str, str]] | None = None) -> List[Dict[str, str]]:
         today = date.today()
-        month_from = (today.replace(day=1))
+        lookback_months = max(1, int(os.getenv("ORDER_PLAN_LOOKBACK_MONTHS", "6")))
+        month_from = today.replace(day=1)
+        for _ in range(lookback_months):
+            month_from = (month_from - timedelta(days=1)).replace(day=1)
         params = {
             "inqryDiv": "1",
             "orderBgnYm": month_from.strftime("%Y%m"),

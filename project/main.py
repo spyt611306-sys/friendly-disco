@@ -86,9 +86,10 @@ def new_collect_job() -> Dict[str, Any]:
 COLLECT_JOB: Dict[str, Any] = new_collect_job()
 COLLECT_TASK: Optional[asyncio.Task] = None
 COLLECT_TASK_TIMEOUT_SECONDS = int(os.getenv("COLLECT_TASK_TIMEOUT_SECONDS", "120"))
-DEFAULT_PIPELINE_ALIASES = [x.strip() for x in os.getenv("DEFAULT_PIPELINE_ALIASES", "bid,contract,prespec,ship_support,ship_operation").split(",") if x.strip()]
-DISPLAY_PLATFORM_KEYWORDS = ["선박", "함정", "함선", "실습선", "행정선", "청항선", "관공선", "경비함", "순시선", "예인선", "방제선", "3천톤", "3000톤", "3,000톤", "동해행정선", "군산실습선", "군산청항선", "ship", "vessel", "patrol vessel", "training ship", "government vessel", "shipyard", "dry dock", "dock"]
+DEFAULT_PIPELINE_ALIASES = [x.strip() for x in os.getenv("DEFAULT_PIPELINE_ALIASES", "bid,contract,prespec,order_plan,ship_support").split(",") if x.strip()]
+DISPLAY_PLATFORM_KEYWORDS = ["선박", "함정", "함선", "실습선", "탐사실습선", "해양수산탐사실습선", "행정선", "청항선", "관공선", "경비함", "순시선", "예인선", "방제선", "소방정", "차도선", "3천톤", "3000톤", "3,000톤", "동해행정선", "군산실습선", "군산청항선", "우도차도선", "ship", "vessel", "patrol vessel", "training ship", "government vessel", "shipyard", "dry dock", "dock", "ctv", "crew transfer vessel"]
 DISPLAY_EXCLUDE_KEYWORDS = ["정수장", "해수담수화", "혈액투석", "의약품", "학교", "체육관", "냉난방", "하수", "상수", "배수개선", "아스콘", "마네킹", "농업", "교량", "도로", "터널", "청진기", "박스", "플랜지", "파이프", "압축가스"]
+WATCHLIST_KEYWORDS = ["군산실습선", "해림2호", "우도차도선", "우도 차도선", "해경청3000톤", "3000톤", "3천톤", "3019함", "3020함", "동해행정선", "군산청항선", "소방청300t", "소방정", "관공선", "실습선", "탐사실습선", "행정선", "청항선", "순시선", "경비함", "하이브리드 전기추진", "전기추진", "ctv", "crew transfer vessel", "말콘"]
 
 
 def normalize_display_text(value: Any) -> str:
@@ -111,10 +112,40 @@ def extract_abb_meta(raw_payload: Dict[str, Any]) -> Dict[str, Any]:
         "buyerKeywords": detail.get("buyerKeywords") or [],
         "equipmentKeywords": detail.get("equipmentKeywords") or [],
         "platformKeywords": detail.get("platformKeywords") or [],
+        "watchlistHits": detail.get("watchlistHits") or [],
         "excludeKeywords": detail.get("excludeKeywords") or [],
         "driveScore": int(component.get("driveScore") or 0),
         "motorScore": int(component.get("motorScore") or 0),
         "powerScore": int(component.get("powerScore") or 0),
+    }
+
+
+def is_watchlist_hit(project: Dict[str, Any]) -> bool:
+    text = " ".join([
+        str(project.get("name") or ""),
+        str(project.get("company") or ""),
+        str(project.get("announcementNo") or ""),
+        str(project.get("projectNo") or ""),
+        str(project.get("contractNo") or ""),
+        str(project.get("keywordText") or ""),
+        " ".join(project.get("matchedKeywords") or []),
+        " ".join(project.get("platformKeywords") or []),
+        " ".join(project.get("watchlistHits") or []),
+    ]).lower()
+    return any(keyword.lower() in text for keyword in WATCHLIST_KEYWORDS)
+
+
+def project_data_quality(projects: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total = len(projects)
+    with_delivery = sum(1 for p in projects if p.get("deliveryDate"))
+    verified = sum(1 for p in projects if p.get("verifiedStatus") == "VERIFIED")
+    watch_hits = sum(1 for p in projects if is_watchlist_hit(p))
+    return {
+        "total": total,
+        "withDeliveryDate": with_delivery,
+        "deliveryCoverage": round(with_delivery / total, 4) if total else 0,
+        "verifiedCount": verified,
+        "watchlistHitCount": watch_hits,
     }
 
 
@@ -124,12 +155,15 @@ def should_display_project(project: Dict[str, Any]) -> bool:
     title = project.get("name") or ""
     company = project.get("company") or ""
     abb = extract_abb_meta(project.get("rawPayload") or {})
-    has_platform = bool(abb.get("platformKeywords")) or contains_any_keyword(title, DISPLAY_PLATFORM_KEYWORDS) or contains_any_keyword(company, DISPLAY_PLATFORM_KEYWORDS)
+    has_watchlist = bool(abb.get("watchlistHits")) or is_watchlist_hit(project)
+    has_platform = has_watchlist or bool(abb.get("platformKeywords")) or contains_any_keyword(title, DISPLAY_PLATFORM_KEYWORDS) or contains_any_keyword(company, DISPLAY_PLATFORM_KEYWORDS)
     has_buyer = bool(abb.get("buyerKeywords"))
     has_equipment = bool(abb.get("equipmentKeywords")) or any(int(abb.get(k, 0) or 0) > 0 for k in ["driveScore", "motorScore", "powerScore"])
     hard_excluded = contains_any_keyword(title, DISPLAY_EXCLUDE_KEYWORDS)
     if hard_excluded and not has_platform:
         return False
+    if has_watchlist:
+        return True
     if has_platform and abb.get("priority") in {"HOT", "WARM", "WATCH"} and abb.get("score", 0) >= 45:
         return True
     if has_platform and (has_buyer or has_equipment):
@@ -385,11 +419,15 @@ def row_to_project(row: Dict[str, Any]) -> Dict[str, Any]:
         "buyerKeywords": abb_meta.get("buyerKeywords", []),
         "equipmentKeywords": abb_meta.get("equipmentKeywords", []),
         "platformKeywords": abb_meta.get("platformKeywords", []),
+        "watchlistHits": abb_meta.get("watchlistHits", []),
         "excludeKeywords": abb_meta.get("excludeKeywords", []),
+        "verifiedStatus": ((raw_payload.get("_verified") or {}).get("status") or "UNVERIFIED"),
+        "verifiedReason": ((raw_payload.get("_verified") or {}).get("reason")),
+        "evidenceUrls": ((raw_payload.get("_verified") or {}).get("evidenceUrls") or []),
     }
 
 
-def fetch_projects_from_db(q: str = "") -> Dict[str, Any]:
+def fetch_projects_from_db(q: str = "", focus: str = "ALL", verified_only: bool = False) -> Dict[str, Any]:
     try:
         with closing(get_db_connection()) as conn:
             with conn.cursor() as cur:
@@ -421,9 +459,16 @@ def fetch_projects_from_db(q: str = "") -> Dict[str, Any]:
                     last_collected_at = str(log_row["created_at"])
                 projects = [row_to_project(row) for row in rows]
                 projects = [project for project in projects if should_display_project(project)]
+                if verified_only:
+                    projects = [project for project in projects if project.get("verifiedStatus") == "VERIFIED"]
+                if focus == "WATCHLIST":
+                    projects = [project for project in projects if is_watchlist_hit(project)]
+                elif focus == "VERIFIED":
+                    projects = [project for project in projects if project.get("verifiedStatus") == "VERIFIED"]
                 return {
                     "projects": projects,
                     "lastCollectedAt": last_collected_at,
+                    "dataQuality": project_data_quality(projects),
                 }
     except Exception as exc:
         logger.exception("프로젝트 조회 실패: %s", str(exc))
@@ -581,8 +626,12 @@ async def serve_index() -> FileResponse:
 
 
 @app.get("/api/projects")
-def get_projects(q: str = Query(default="")) -> Dict[str, Any]:
-    return fetch_projects_from_db(q=q)
+def get_projects(
+    q: str = Query(default=""),
+    focus: str = Query(default="ALL"),
+    verified_only: bool = Query(default=False),
+) -> Dict[str, Any]:
+    return fetch_projects_from_db(q=q, focus=focus, verified_only=verified_only)
 
 
 @app.get("/api/meta/apis")

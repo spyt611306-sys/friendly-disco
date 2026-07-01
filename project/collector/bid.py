@@ -43,9 +43,9 @@ class BidCollector(BaseCollector):
 
     async def collect(self, seed_projects: List[Dict[str, Any]] | None = None) -> List[Dict[str, Any]]:
         end_day = date.today()
-        start_day = end_day - timedelta(days=get_env_int("BID_LOOKBACK_DAYS", 2) - 1)
+        start_day = end_day - timedelta(days=get_env_int("BID_LOOKBACK_DAYS", 180) - 1)
         windows = chunk_days(start_day, end_day, 1)
-        target_ops = [x.strip() for x in os.getenv("BID_TARGET_OPS", "getBidPblancListInfoThng,getBidPblancListInfoServc").split(",") if x.strip()]
+        target_ops = [x.strip() for x in os.getenv("BID_TARGET_OPS", "getBidPblancListInfoThng,getBidPblancListInfoServc,getBidPblancListInfoCnstwk,getBidPblancListInfoThngPPSSrch,getBidPblancListInfoServcPPSSrch,getBidPblancListInfoCnstwkPPSSrch,getBidPblancListInfoEorderAtchFileInfo").split(",") if x.strip()]
         results: List[Dict[str, Any]] = []
         for operation_name in target_ops:
             for left, right in windows:

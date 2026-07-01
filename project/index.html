@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ABB Ability™ - Ship Delivery Intelligence (SDI) 통합 대시보드</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="./styles.css">
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
@@ -29,6 +29,11 @@
             { id: 'incheon_port', name: '인천항만 Open API', targetUrl: '-', method: '보류', frequency: '보류', status: 'PAUSED' }
         ];
 
+        const PIPELINE_SEQUENCE = ['bid','contract','prespec','order_plan','ship_support'];
+        const MARINE_KEYWORDS = ['선박','함정','함선','실습선','탐사실습선','해양수산탐사실습선','행정선','청항선','관공선','경비함','순시선','예인선','방제선','소방정','차도선','3천톤','3000톤','3,000톤','동해행정선','군산실습선','군산청항선','우도차도선','ship','vessel','patrol vessel','training ship','government vessel','shipyard','dry dock','dock','ctv','crew transfer vessel'];
+        const TITLE_EXCLUDE_KEYWORDS = ['정수장','해수담수화','혈액투석','의약품','학교','체육관','냉난방','하수','상수','배수개선','아스콘','마네킹','농업','교량','도로','터널','청진기','박스','플랜지','파이프','압축가스'];
+        const WATCHLIST_TERMS = ['군산실습선','해림2호','우도차도선','우도 차도선','해경청3000톤','3000톤','3천톤','3019함','3020함','동해행정선','군산청항선','소방청300t','소방정','관공선','실습선','탐사실습선','행정선','청항선','순시선','경비함','하이브리드 전기추진','전기추진','ctv','crew transfer vessel','말콘'];
+
         function calcOrderWindow(deliveryDateStr) {
             if (!deliveryDateStr) return { deadlineDateStr: '-', monthsLeft: 0, isOverdue: false, isUrgent: false };
             const currentDate = new Date();
@@ -38,316 +43,48 @@
             orderDeadline.setMonth(orderDeadline.getMonth() - 4);
             const diffDays = Math.ceil((orderDeadline - currentDate) / (1000 * 60 * 60 * 24));
             const diffMonths = parseFloat((diffDays / 30.4).toFixed(1));
-            return {
-                deadlineDateStr: orderDeadline.toISOString().split('T')[0],
-                monthsLeft: diffMonths,
-                isOverdue: diffMonths <= 0,
-                isUrgent: diffMonths > 0 && diffMonths <= 3
-            };
+            return { deadlineDateStr: orderDeadline.toISOString().split('T')[0], monthsLeft: diffMonths, isOverdue: diffMonths <= 0, isUrgent: diffMonths > 0 && diffMonths <= 3 };
         }
+
+        function normalizeText(value) { return String(value || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+        function containsAny(text, keywords) { const norm = normalizeText(text); return keywords.some(k => norm.includes(String(k).toLowerCase())); }
 
         function sdiApp() {
             return {
-                projects: [],
-                channels: collectorChannels,
-                searchTerm: '',
-                filterSourceType: 'ALL',
-                filterStatus: 'ALL',
-                filterDriveStatus: 'ALL',
-                selectedProject: null,
-                deliverySortOrder: 'NONE',
-                valueSortOrder: 'NONE',
-                viewMode: 'grid',
-                isThinking: false,
-                thinkingStep: 0,
-                thinkingLogs: [],
-                toastMessage: null,
-                isLoading: true,
-                lastCollectedAt: null,
-                lastStatusSignature: null,
-
-                async init() {
-                    await this.fetchLatestProjects();
-                    this.$nextTick(() => lucide.createIcons());
+                projects: [], channels: collectorChannels, searchTerm: '', filterSourceType: 'ALL', filterStatus: 'ALL', filterDriveStatus: 'ALL', selectedProject: null, sortMode: 'abbScoreDesc', viewMode: 'grid', focusMode: 'ALL', isThinking: false, thinkingStep: 0, thinkingLogs: [], toastMessage: null, isLoading: true, lastCollectedAt: null, lastStatusSignature: null, showRawPayload: false, dataQuality: null,
+                async init() { await this.fetchLatestProjects(); this.$nextTick(() => lucide.createIcons()); },
+                triggerToast(msg) { this.toastMessage = msg; this.$nextTick(() => lucide.createIcons()); setTimeout(() => { this.toastMessage = null; }, 3000); },
+                getAbbMeta(project) {
+                    const raw = project?.rawPayload || {};
+                    const meta = raw._abbTargeting || {};
+                    const detail = meta.detail || {};
+                    const comp = detail.componentScores || {};
+                    return { score: Number(project?.abbScore ?? meta.score ?? 0), priority: project?.abbPriority || meta.priority || project?.verificationStatus || 'DROP', gateKeywords: project?.marineGateKeywords || detail.gateKeywords || [], buyerKeywords: project?.buyerKeywords || detail.buyerKeywords || [], equipmentKeywords: project?.equipmentKeywords || detail.equipmentKeywords || [], platformKeywords: project?.platformKeywords || detail.platformKeywords || [], watchlistHits: project?.watchlistHits || detail.watchlistHits || [], excludeKeywords: project?.excludeKeywords || detail.excludeKeywords || [], driveScore: Number(project?.driveScore ?? comp.driveScore ?? 0), motorScore: Number(project?.motorScore ?? comp.motorScore ?? 0), powerScore: Number(project?.powerScore ?? comp.powerScore ?? 0) };
                 },
-
-                triggerToast(msg) {
-                    this.toastMessage = msg;
-                    this.$nextTick(() => lucide.createIcons());
-                    setTimeout(() => { this.toastMessage = null; }, 3000);
-                },
-
-                formatBudget(project) {
-                    const raw = project.orderValue;
-                    if (raw === null || raw === undefined || raw === '') return '-';
-                    const num = Number(String(raw).replace(/[^0-9.-]/g, ''));
-                    if (Number.isNaN(num)) return String(raw);
-                    return (project.currency || 'KRW') === 'KRW' ? '₩ ' + num.toLocaleString('ko-KR') : (project.currency || 'USD') + ' ' + num.toLocaleString('en-US');
-                },
-
-                formattedRaw(project) {
-                    return JSON.stringify(project.rawPayload || {}, null, 2);
-                },
-
-                calculateOrderWindow(deliveryDateStr) {
-                    return calcOrderWindow(deliveryDateStr);
-                },
-
-                appendThinkingLog(message) {
-                    if (!message) return;
-                    const lastMessage = this.thinkingLogs[this.thinkingLogs.length - 1];
-                    if (lastMessage !== message) {
-                        this.thinkingLogs.push(message);
-                        if (this.thinkingLogs.length > 30) {
-                            this.thinkingLogs = this.thinkingLogs.slice(-30);
-                        }
-                    }
-                },
-
-                sleep(ms) {
-                    return new Promise((resolve) => setTimeout(resolve, ms));
-                },
-
-                collectorLabel(alias) {
-                    const labels = {
-                        bid: '입찰공고',
-                        contract: '계약',
-                        award: '낙찰',
-                        order_plan: '발주계획',
-                        prespec: '사전규격',
-                        public_data: '공공데이터개방표준',
-                        ship_support: '선박제원',
-                        ship_operation: '선박운항',
-                        user_info: '사용자정보',
-                        incheon_port: '인천항만'
-                    };
-                    return labels[alias] || alias || '수집';
-                },
-
-                async apiRequest(url, options = {}) {
-                    const response = await fetch(url, {
-                        headers: {
-                            'Accept': 'application/json',
-                            ...(options.headers || {})
-                        },
-                        ...options
-                    });
-
-                    const rawText = await response.text();
-                    let data = null;
-
-                    if (rawText) {
-                        try {
-                            data = JSON.parse(rawText);
-                        } catch (parseError) {
-                            data = null;
-                        }
-                    }
-
-                    if (!response.ok) {
-                        const detail = data?.detail || data?.message || rawText || `HTTP ${response.status}`;
-                        throw new Error(detail);
-                    }
-
-                    return data;
-                },
-
-                async fetchLatestProjects() {
-                    this.isLoading = true;
-                    try {
-                        const data = await this.apiRequest('/api/projects');
-                        this.projects = Array.isArray(data?.projects) ? data.projects : [];
-                        this.lastCollectedAt = data?.lastCollectedAt || null;
-                    } catch (error) {
-                        console.error(error);
-                        this.projects = [];
-                        this.lastCollectedAt = null;
-                        this.triggerToast('프로젝트를 불러오지 못했습니다.');
-                    } finally {
-                        this.isLoading = false;
-                        this.$nextTick(() => lucide.createIcons());
-                    }
-                },
-
-                async pollCollectJob(jobId) {
-                    let retryCount = 0;
-
-                    while (true) {
-                        try {
-                            const status = await this.apiRequest('/api/collect/status');
-
-                            if (jobId && status?.jobId && status.jobId !== jobId) {
-                                await this.sleep(1500);
-                                continue;
-                            }
-
-                            const signature = [status?.status, status?.currentStep, status?.message, status?.savedCount, status?.rawCount].join('|');
-                            if (signature !== this.lastStatusSignature) {
-                                this.lastStatusSignature = signature;
-
-                                if (status?.currentStep) {
-                                    this.appendThinkingLog(`${this.collectorLabel(status.currentStep)} 수집 중...`);
-                                }
-                                if (status?.message) {
-                                    this.appendThinkingLog(status.message);
-                                }
-                            }
-
-                            this.thinkingStep = status?.running ? 4 : 5;
-
-                            if (status?.status === 'SUCCESS' || status?.status === 'FAILED' || status?.status === 'CANCELLED') {
-                                return status;
-                            }
-
-                            retryCount = 0;
-                        } catch (error) {
-                            retryCount += 1;
-                            if (retryCount >= 3) {
-                                throw error;
-                            }
-                            this.appendThinkingLog('상태 재확인 중...');
-                        }
-
-                        await this.sleep(2500);
-                    }
-                },
-
-                async resetCollectState(silent = false) {
-                    try {
-                        await this.apiRequest('/api/collect/reset', { method: 'POST' });
-                    } catch (error) {
-                        console.error(error);
-                        if (!silent) {
-                            this.triggerToast(error?.message || '수집 상태 초기화 실패');
-                        }
-                        return;
-                    }
-
-                    this.isThinking = false;
-                    this.thinkingStep = 0;
-                    this.thinkingLogs = [];
-                    this.lastStatusSignature = null;
-                    if (!silent) {
-                        this.triggerToast('수집 상태를 초기화했습니다.');
-                    }
-                },
-
-                async runAiThinking() {
-                    if (this.isThinking) {
-                        this.triggerToast('이미 수집 작업이 실행 중입니다.');
-                        return;
-                    }
-
-                    this.isThinking = true;
-                    this.thinkingStep = 1;
-                    this.thinkingLogs = ['백그라운드 수집 요청 중...'];
-                    this.lastStatusSignature = null;
-
-                    try {
-                        const start = await this.apiRequest('/api/collect', { method: 'POST' });
-                        this.appendThinkingLog(start?.message || '수집 작업이 시작되었습니다.');
-
-                        const finalStatus = await this.pollCollectJob(start?.jobId);
-                        await this.fetchLatestProjects();
-
-                        if (finalStatus?.status === 'SUCCESS') {
-                            this.thinkingStep = 5;
-                            this.triggerToast(finalStatus?.message || '수집이 완료되었습니다.');
-                        } else {
-                            this.triggerToast(finalStatus?.error || finalStatus?.message || '수집 중 오류가 발생했습니다.');
-                        }
-                    } catch (error) {
-                        console.error(error);
-                        this.triggerToast(error?.message || '수집 시작 중 오류가 발생했습니다.');
-                    } finally {
-                        this.isThinking = false;
-                        this.$nextTick(() => lucide.createIcons());
-                    }
-                },
-
-                async runSingleCollector(channel) {
-                    if (channel.id === 'incheon_port') {
-                        this.triggerToast('인천항만 Collector는 보류 상태입니다.');
-                        return;
-                    }
-
-                    if (this.isThinking) {
-                        this.triggerToast('이미 수집 작업이 실행 중입니다.');
-                        return;
-                    }
-
-                    this.isThinking = true;
-                    this.thinkingStep = 1;
-                    this.thinkingLogs = [`${channel.name} 실행 요청 중...`];
-                    this.lastStatusSignature = null;
-
-                    try {
-                        const start = await this.apiRequest(`/api/collect/${channel.id}`, { method: 'POST' });
-                        this.appendThinkingLog(start?.message || `${channel.name} 수집 시작`);
-
-                        const finalStatus = await this.pollCollectJob(start?.jobId);
-                        await this.fetchLatestProjects();
-
-                        if (finalStatus?.status === 'SUCCESS') {
-                            this.thinkingStep = 5;
-                            this.triggerToast(finalStatus?.message || `${channel.name} 실행 완료`);
-                        } else {
-                            this.triggerToast(finalStatus?.error || finalStatus?.message || `${channel.name} 실행 실패`);
-                        }
-                    } catch (error) {
-                        console.error(error);
-                        this.triggerToast(error?.message || `${channel.name} 실행 실패`);
-                    } finally {
-                        this.isThinking = false;
-                        this.$nextTick(() => lucide.createIcons());
-                    }
-                },
-
-                toggleSort(sortType) {
-                    if (sortType === 'delivery') {
-                        this.valueSortOrder = 'NONE';
-                        this.deliverySortOrder = this.deliverySortOrder === 'NONE' ? 'ASC' : (this.deliverySortOrder === 'ASC' ? 'DESC' : 'NONE');
-                    }
-                    if (sortType === 'value') {
-                        this.deliverySortOrder = 'NONE';
-                        this.valueSortOrder = this.valueSortOrder === 'NONE' ? 'DESC' : (this.valueSortOrder === 'DESC' ? 'ASC' : 'NONE');
-                    }
-                },
-
-                filteredAndSortedProjects() {
-                    let filtered = this.projects.filter((p) => {
-                        const text = [
-                            p.name, p.company, p.announcementNo, p.projectNo, p.contractNo, p.region,
-                            p.keywordText, p.registeredAt, p.orderValue, (p.matchedKeywords || []).join(' ')
-                        ].join(' ').toLowerCase();
-                        const matchesSearch = text.includes(this.searchTerm.toLowerCase());
-                        const matchesSource = this.filterSourceType === 'ALL' || p.sourceType === this.filterSourceType;
-                        const matchesStatus = this.filterStatus === 'ALL' || p.verificationStatus === this.filterStatus;
-                        const orderState = calcOrderWindow(p.deliveryDate);
-                        const matchesDrive = this.filterDriveStatus === 'ALL'
-                            || (this.filterDriveStatus === 'OVERDUE' && orderState.isOverdue)
-                            || (this.filterDriveStatus === 'URGENT' && orderState.isUrgent)
-                            || (this.filterDriveStatus === 'SAFE' && !orderState.isOverdue && !orderState.isUrgent);
-                        return matchesSearch && matchesSource && matchesStatus && matchesDrive;
-                    });
-
-                    if (this.deliverySortOrder !== 'NONE') {
-                        filtered = filtered.sort((a, b) => {
-                            const aDate = a.deliveryDate ? new Date(a.deliveryDate).getTime() : 0;
-                            const bDate = b.deliveryDate ? new Date(b.deliveryDate).getTime() : 0;
-                            return this.deliverySortOrder === 'ASC' ? aDate - bDate : bDate - aDate;
-                        });
-                    }
-
-                    if (this.valueSortOrder !== 'NONE') {
-                        filtered = filtered.sort((a, b) => {
-                            const aVal = Number(String(a.orderValue || '0').replace(/[^0-9.-]/g, '')) || 0;
-                            const bVal = Number(String(b.orderValue || '0').replace(/[^0-9.-]/g, '')) || 0;
-                            return this.valueSortOrder === 'ASC' ? aVal - bVal : bVal - aVal;
-                        });
-                    }
-                    return filtered;
-                }
+                getBudgetRaw(project) { const raw = project?.rawPayload || {}; return project?.orderValue || raw.presmptPrce || raw.asignBdgtAmt || raw.totPrdprc || raw.cntrctAmt || raw.sumOrderAmt || raw.fnlSucsfAmt || ''; },
+                formatBudget(project) { const raw = this.getBudgetRaw(project); if (raw === null || raw === undefined || raw === '') return '-'; const num = Number(String(raw).replace(/[^0-9.-]/g, '')); if (Number.isNaN(num)) return String(raw); return (project.currency || 'KRW') === 'KRW' ? '₩ ' + num.toLocaleString('ko-KR') : (project.currency || 'USD') + ' ' + num.toLocaleString('en-US'); },
+                formattedRaw(project) { return JSON.stringify(project.rawPayload || {}, null, 2); },
+                calculateOrderWindow(deliveryDateStr) { return calcOrderWindow(deliveryDateStr); },
+                appendThinkingLog(message) { if (!message) return; const lastMessage = this.thinkingLogs[this.thinkingLogs.length - 1]; if (lastMessage !== message) { this.thinkingLogs.push(message); if (this.thinkingLogs.length > 30) this.thinkingLogs = this.thinkingLogs.slice(-30); } },
+                sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); },
+                pipelineStep(alias) { const idx = PIPELINE_SEQUENCE.indexOf(alias); return idx >= 0 ? idx + 1 : 1; },
+                deliveryCoverage() { const visible = this.screenedProjects(); const withDate = visible.filter(p => !!p.deliveryDate).length; const ratio = visible.length ? withDate / visible.length : 0; return { total: visible.length, withDate, ratio }; },
+                showOrderKpis() { const c = this.deliveryCoverage(); return c.total >= 3 && c.ratio >= 0.3; },
+                isWatchlistHit(project) { const text = [project?.name, project?.company, project?.announcementNo, project?.projectNo, project?.contractNo, ...(project?.matchedKeywords || []), ...(project?.platformKeywords || []), ...(project?.watchlistHits || []), project?.keywordText].join(' ').toLowerCase(); return WATCHLIST_TERMS.some(term => text.includes(String(term).toLowerCase())); },
+                collectorLabel(alias) { const labels = { bid: '입찰공고', contract: '계약', award: '낙찰', order_plan: '발주계획', prespec: '사전규격', public_data: '공공데이터개방표준', ship_support: '선박제원', ship_operation: '선박운항', user_info: '사용자정보', incheon_port: '인천항만' }; return labels[alias] || alias || '수집'; },
+                async apiRequest(url, options = {}) { const response = await fetch(url, { headers: { 'Accept': 'application/json', ...(options.headers || {}) }, ...options }); const rawText = await response.text(); let data = null; if (rawText) { try { data = JSON.parse(rawText); } catch { data = null; } } if (!response.ok) { const detail = data?.detail || data?.message || rawText || `HTTP ${response.status}`; throw new Error(detail); } return data; },
+                async fetchLatestProjects() { this.isLoading = true; try { const data = await this.apiRequest('/api/projects'); this.projects = Array.isArray(data?.projects) ? data.projects : []; this.lastCollectedAt = data?.lastCollectedAt || null; this.dataQuality = data?.dataQuality || null; } catch (error) { console.error(error); this.projects = []; this.lastCollectedAt = null; this.dataQuality = null; this.triggerToast('프로젝트를 불러오지 못했습니다.'); } finally { this.isLoading = false; this.$nextTick(() => lucide.createIcons()); } },
+                async pollCollectJob(jobId) { let retryCount = 0; while (true) { try { const status = await this.apiRequest('/api/collect/status'); if (jobId && status?.jobId && status.jobId !== jobId) { await this.sleep(1500); continue; } const signature = [status?.status, status?.currentStep, status?.message, status?.savedCount, status?.rawCount].join('|'); if (signature !== this.lastStatusSignature) { this.lastStatusSignature = signature; if (status?.currentStep) this.appendThinkingLog(`${this.collectorLabel(status.currentStep)} 수집 중...`); if (status?.message) this.appendThinkingLog(status.message); } this.thinkingStep = status?.running ? this.pipelineStep(status?.currentStep) : PIPELINE_SEQUENCE.length; if (['SUCCESS','FAILED','CANCELLED'].includes(status?.status)) return status; retryCount = 0; } catch (error) { retryCount += 1; this.appendThinkingLog(`상태 재확인 중... (${retryCount})`); if (retryCount >= 12) throw error; await this.sleep(retryCount >= 6 ? 5000 : 2500); continue; } await this.sleep(2500); } },
+                async resetCollectState(silent = false) { try { await this.apiRequest('/api/collect/reset', { method: 'POST' }); } catch (error) { console.error(error); if (!silent) this.triggerToast(error?.message || '수집 상태 초기화 실패'); return; } this.isThinking = false; this.thinkingStep = 0; this.thinkingLogs = []; this.lastStatusSignature = null; if (!silent) this.triggerToast('수집 상태를 초기화했습니다.'); },
+                async runAiThinking() { if (this.isThinking) { this.triggerToast('이미 수집 작업이 실행 중입니다.'); return; } this.isThinking = true; this.thinkingStep = 1; this.thinkingLogs = ['백그라운드 수집 요청 중...']; this.lastStatusSignature = null; try { const start = await this.apiRequest('/api/collect', { method: 'POST' }); this.appendThinkingLog(start?.message || '수집 작업이 시작되었습니다.'); const finalStatus = await this.pollCollectJob(start?.jobId); await this.fetchLatestProjects(); if (finalStatus?.status === 'SUCCESS') { this.thinkingStep = 5; this.triggerToast(finalStatus?.message || '수집이 완료되었습니다.'); } else { this.triggerToast(finalStatus?.error || finalStatus?.message || '수집 중 오류가 발생했습니다.'); } } catch (error) { console.error(error); this.triggerToast(error?.message || '수집 시작 중 오류가 발생했습니다.'); } finally { this.isThinking = false; this.$nextTick(() => lucide.createIcons()); } },
+                async runSingleCollector(channel) { if (channel.id === 'incheon_port') { this.triggerToast('인천항만 Collector는 보류 상태입니다.'); return; } if (this.isThinking) { this.triggerToast('이미 수집 작업이 실행 중입니다.'); return; } this.isThinking = true; this.thinkingStep = 1; this.thinkingLogs = [`${channel.name} 실행 요청 중...`]; this.lastStatusSignature = null; try { const start = await this.apiRequest(`/api/collect/${channel.id}`, { method: 'POST' }); this.appendThinkingLog(start?.message || `${channel.name} 수집 시작`); const finalStatus = await this.pollCollectJob(start?.jobId); await this.fetchLatestProjects(); if (finalStatus?.status === 'SUCCESS') { this.thinkingStep = 5; this.triggerToast(finalStatus?.message || `${channel.name} 실행 완료`); } else { this.triggerToast(finalStatus?.error || finalStatus?.message || `${channel.name} 실행 실패`); } } catch (error) { console.error(error); this.triggerToast(error?.message || `${channel.name} 실행 실패`); } finally { this.isThinking = false; this.$nextTick(() => lucide.createIcons()); } },
+                isDisplayCandidate(project) { if (!project) return false; if (project.sourceType === 'SHIP') return true; const title = project.name || ''; const company = project.company || ''; const abb = this.getAbbMeta(project); const hasWatchlist = (abb.watchlistHits || []).length > 0 || this.isWatchlistHit(project); const hasPlatform = hasWatchlist || (abb.platformKeywords || []).length > 0 || containsAny(title, MARINE_KEYWORDS) || containsAny(company, MARINE_KEYWORDS) || (project.matchedKeywords || []).some(k => MARINE_KEYWORDS.includes(k)); const hasBuyer = (abb.buyerKeywords || []).length > 0; const hasEquipment = (abb.equipmentKeywords || []).length > 0 || abb.driveScore > 0 || abb.motorScore > 0 || abb.powerScore > 0; const hardExcluded = containsAny(title, TITLE_EXCLUDE_KEYWORDS); if (hardExcluded && !hasPlatform) return false; if (hasWatchlist) return true; if (abb.priority === 'DROP') return false; return hasPlatform && (hasBuyer || hasEquipment || abb.score >= 45); },
+                screenedProjects() { let rows = this.projects.filter(project => this.isDisplayCandidate(project)); if (this.focusMode === 'WATCHLIST') rows = rows.filter(project => this.isWatchlistHit(project)); if (this.focusMode === 'UNVERIFIED') rows = rows.filter(project => !project?.verifiedStatus || project.verifiedStatus !== 'VERIFIED'); return rows; },
+                hiddenNonMarineCount() { return Math.max(0, this.projects.length - this.screenedProjects().length); },
+                projectScoreClass(score) { if (score >= 85) return 'bg-emerald-50 text-emerald-700 border border-emerald-200'; if (score >= 65) return 'bg-blue-50 text-blue-700 border border-blue-200'; if (score >= 45) return 'bg-amber-50 text-amber-700 border border-amber-200'; return 'bg-slate-100 text-slate-600 border border-slate-200'; },
+                projectInfoRows(project) { const abb = this.getAbbMeta(project); return [ { label: '기관명', value: project.company || '-' }, { label: '공고번호', value: project.announcementNo || '-' }, { label: '계약번호', value: project.contractNo || '-' }, { label: '프로젝트번호', value: project.projectNo || '-' }, { label: '지역', value: project.region || '-' }, { label: '등록일', value: project.registeredAt || '-' }, { label: '예산/금액', value: this.formatBudget(project), klass: 'font-bold text-blue-600' }, { label: 'ABB 우선순위', value: `${abb.priority} / ${abb.score}`, klass: 'font-bold text-[#E0001A]' } ]; },
+                projectPayloadRows(project) { const raw = project?.rawPayload || {}; return [ { label: '공고명', value: raw.bidNtceNm || raw.prdctClsfcNoNm || project.name || '-' }, { label: '수요기관', value: raw.dminsttNm || raw.orderInsttNm || project.company || '-' }, { label: '입찰방식', value: raw.bidMethdNm || '-' }, { label: '계약방법', value: raw.cntrctMthdNm || '-' }, { label: '추정가격', value: this.formatBudget({ ...project, orderValue: raw.presmptPrce || raw.asignBdgtAmt || project.orderValue }) }, { label: '입찰개시', value: raw.bidBeginDt || raw.opengDt || '-' }, { label: '입찰마감', value: raw.bidClseDt || raw.opninRgstClseDt || '-' }, { label: '납품기한', value: raw.dlvrTmlmtDt || raw.dlvrDaynum || project.deliveryDate || '-' }, { label: '제품상세', value: raw.prdctDtlList || raw.prdctClsfcNoNm || '-' } ]; },
+                filteredAndSortedProjects() { let filtered = this.screenedProjects().filter((p) => { const text = [p.name, p.company, p.announcementNo, p.projectNo, p.contractNo, p.region, p.keywordText, p.registeredAt, p.orderValue, (p.matchedKeywords || []).join(' '), (p.equipmentKeywords || []).join(' ')].join(' ').toLowerCase(); const matchesSearch = text.includes(this.searchTerm.toLowerCase()); const matchesSource = this.filterSourceType === 'ALL' || p.sourceType === this.filterSourceType; const matchesStatus = this.filterStatus === 'ALL' || p.verificationStatus === this.filterStatus || p.abbPriority === this.filterStatus; const orderState = calcOrderWindow(p.deliveryDate); const matchesDrive = this.filterDriveStatus === 'ALL' || (this.filterDriveStatus === 'OVERDUE' && orderState.isOverdue) || (this.filterDriveStatus === 'URGENT' && orderState.isUrgent) || (this.filterDriveStatus === 'SAFE' && !orderState.isOverdue && !orderState.isUrgent); return matchesSearch && matchesSource && matchesStatus && matchesDrive; }); const numVal = (v) => Number(String(v || '0').replace(/[^0-9.-]/g, '')) || 0; filtered.sort((a, b) => { const abbA = this.getAbbMeta(a), abbB = this.getAbbMeta(b); if (this.sortMode === 'driveScoreDesc') return abbB.driveScore - abbA.driveScore || abbB.score - abbA.score; if (this.sortMode === 'motorScoreDesc') return abbB.motorScore - abbA.motorScore || abbB.score - abbA.score; if (this.sortMode === 'powerScoreDesc') return abbB.powerScore - abbA.powerScore || abbB.score - abbA.score; if (this.sortMode === 'valueDesc') return numVal(this.getBudgetRaw(b)) - numVal(this.getBudgetRaw(a)); if (this.sortMode === 'deliveryAsc') return (new Date(a.deliveryDate || 0).getTime() || 0) - (new Date(b.deliveryDate || 0).getTime() || 0); if (this.sortMode === 'recentDesc') return (new Date(b.registeredAt || 0).getTime() || 0) - (new Date(a.registeredAt || 0).getTime() || 0); return abbB.score - abbA.score || abbB.driveScore - abbA.driveScore || abbB.motorScore - abbA.motorScore; }); return filtered; }
             };
         }
     </script>
@@ -378,17 +115,17 @@
         <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div class="bg-white rounded-xl border border-gray-200/80 p-5 shadow-sm border-l-4 border-slate-700">
                 <div class="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">전체 관리 프로젝트</div>
-                <div class="text-2xl font-black text-slate-800 mt-1" x-text="projects.length + '건'"></div>
-                <div class="text-[10px] text-slate-500 font-semibold mt-1">실제 API 수집 데이터 기준</div>
+                <div class="text-2xl font-black text-slate-800 mt-1" x-text="screenedProjects().length + '건'"></div>
+                <div class="text-[10px] text-slate-500 font-semibold mt-1"><span x-text="`표시 ${screenedProjects().length}건 / 숨김 ${hiddenNonMarineCount()}건`"></span></div>
             </div>
             <div class="bg-white rounded-xl border border-gray-200/80 p-5 shadow-sm border-l-4 border-[#E0001A]">
                 <div class="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">드라이브 기한 초과</div>
-                <div class="text-2xl font-black text-[#E0001A] mt-1" x-text="projects.filter(p => calculateOrderWindow(p.deliveryDate).isOverdue).length + '건'"></div>
+                <template x-if="showOrderKpis()"><div class="text-2xl font-black text-[#E0001A] mt-1" x-text="screenedProjects().filter(p => p.deliveryDate && calculateOrderWindow(p.deliveryDate).isOverdue).length + '건'"></div></template><template x-if="!showOrderKpis()"><div class="text-sm font-bold text-slate-400 mt-2">데이터 준비 중</div></template>
                 <div class="text-[10px] text-rose-500 font-semibold mt-1">납기 정보가 있는 실제 데이터만 계산</div>
             </div>
             <div class="bg-white rounded-xl border border-gray-200/80 p-5 shadow-sm border-l-4 border-amber-500">
                 <div class="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">주문 임박 (3개월 내)</div>
-                <div class="text-2xl font-black text-amber-500 mt-1" x-text="projects.filter(p => calculateOrderWindow(p.deliveryDate).isUrgent).length + '건'"></div>
+                <template x-if="showOrderKpis()"><div class="text-2xl font-black text-amber-500 mt-1" x-text="screenedProjects().filter(p => p.deliveryDate && calculateOrderWindow(p.deliveryDate).isUrgent).length + '건'"></div></template><template x-if="!showOrderKpis()"><div class="text-sm font-bold text-slate-400 mt-2">데이터 준비 중</div></template>
                 <div class="text-[10px] text-amber-500 font-semibold mt-1">납기 정보가 있는 실제 데이터만 계산</div>
             </div>
             <div class="bg-white rounded-xl border border-gray-200/80 p-5 shadow-sm border-l-4 border-emerald-500">
@@ -402,7 +139,7 @@
             <i data-lucide="alert-circle" class="text-[#E0001A] shrink-0 mt-0.5 w-5 h-5"></i>
             <div class="text-xs text-slate-800 leading-relaxed">
                 <span class="font-bold text-[#E0001A]">자동 키워드 필터 기준:</span>
-                선박, 조선, 조선소, 해양, 해군, LNG, LPG, FPSO, Offshore, Marine, Ship, Shipbuilding, Dock, Dry Dock, 엔진, 펌프, 밸브, 배관, 용접, 블록, 기자재, 프로펠러, 전장, 기관
+                선박, 함정, 실습선, 탐사실습선, 행정선, 청항선, 관공선, 경비함, 차도선, 3천톤급, 우도차도선, 군산실습선, 해림2호, Ship, Vessel, CTV, 전기추진, 드라이브, VFD, 추진모터
             </div>
         </div>
 
@@ -470,6 +207,11 @@
                             <button @click="filterSourceType = 'SHIP'" :class="filterSourceType === 'SHIP' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">선박</button>
                         </div>
                         <div class="flex rounded bg-slate-100 p-1 lg:col-span-3">
+                            <button @click="focusMode = 'ALL'" :class="focusMode === 'ALL' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">전체</button>
+                            <button @click="focusMode = 'WATCHLIST'" :class="focusMode === 'WATCHLIST' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">관심 PJT</button>
+                            <button @click="focusMode = 'UNVERIFIED'" :class="focusMode === 'UNVERIFIED' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">미검증</button>
+                        </div>
+                        <div class="flex rounded bg-slate-100 p-1 lg:col-span-3">
                             <button @click="filterDriveStatus = 'ALL'" :class="filterDriveStatus === 'ALL' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">전체오더</button>
                             <button @click="filterDriveStatus = 'OVERDUE'" :class="filterDriveStatus === 'OVERDUE' ? 'bg-[#E0001A] text-white shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">Overdue</button>
                             <button @click="filterDriveStatus = 'URGENT'" :class="filterDriveStatus === 'URGENT' ? 'bg-amber-500 text-white shadow-sm' : 'text-slate-500'" class="flex-1 text-[10px] font-bold py-1 rounded transition">Urgent</button>
@@ -480,10 +222,18 @@
                             <button @click="viewMode = 'table'" :class="viewMode === 'table' ? 'bg-slate-800 text-white' : 'text-slate-500'" class="flex-1 flex justify-center py-1 rounded text-xs font-bold transition"><i data-lucide="sliders" class="w-3.5 h-3.5 mr-1"></i> 테이블</button>
                         </div>
                     </div>
-                    <div class="pt-3 border-t border-slate-100 flex flex-wrap gap-2 items-center text-xs">
+                    <div class="pt-3 border-t border-slate-100 flex flex-wrap gap-3 items-center text-xs">
                         <span class="text-slate-400 font-bold">정렬 기준:</span>
-                        <button @click="toggleSort('delivery')" class="px-2.5 py-1 rounded border flex items-center gap-1 transition" :class="deliverySortOrder !== 'NONE' ? 'bg-[#E0001A] text-white border-[#E0001A]' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"><span>선박 납기일</span><span x-text="deliverySortOrder === 'NONE' ? '↕' : (deliverySortOrder === 'ASC' ? '▲' : '▼')"></span></button>
-                        <button @click="toggleSort('value')" class="px-2.5 py-1 rounded border flex items-center gap-1 transition" :class="valueSortOrder !== 'NONE' ? 'bg-[#E0001A] text-white border-[#E0001A]' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"><span>계약 예산액</span><span x-text="valueSortOrder === 'NONE' ? '↕' : (valueSortOrder === 'ASC' ? '▲' : '▼')"></span></button>
+                        <select x-model="sortMode" class="px-3 py-1.5 rounded border border-slate-200 bg-slate-50 text-slate-700 font-semibold">
+                            <option value="abbScoreDesc">ABB 종합 스코어 높은 순</option>
+                            <option value="driveScoreDesc">드라이브 스코어 높은 순</option>
+                            <option value="motorScoreDesc">모터 스코어 높은 순</option>
+                            <option value="powerScoreDesc">전력변환/ESS 스코어 높은 순</option>
+                            <option value="valueDesc">예산/금액 큰 순</option>
+                            <option value="deliveryAsc">납기 빠른 순</option>
+                            <option value="recentDesc">등록 최신 순</option>
+                        </select>
+                        <span class="text-slate-400">ABB 우선순위와 제품 스코어 기준으로 정렬됩니다.</span>
                     </div>
                 </div>
 
@@ -504,7 +254,10 @@
                             <div class="space-y-3.5">
                                 <div class="flex items-center justify-between gap-2">
                                     <span class="text-[9px] font-bold px-2 py-0.5 rounded uppercase tracking-wider" :class="project.sourceType === 'G2B' ? 'bg-amber-100 text-amber-800' : (project.sourceType === 'PUBLIC_STD' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800')" x-text="project.sourceService"></span>
-                                    <span class="text-[9px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200" x-text="project.verificationStatus"></span>
+                                    <div class="flex items-center gap-1.5">
+                                        <span class="text-[9px] font-bold px-2 py-0.5 rounded" :class="projectScoreClass(getAbbMeta(project).score)" x-text="`ABB ${getAbbMeta(project).score}`"></span>
+                                        <span class="text-[9px] font-bold px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200" x-text="getAbbMeta(project).priority"></span>
+                                    </div>
                                 </div>
                                 <div>
                                     <h3 class="font-bold text-slate-800 text-sm leading-snug group-hover:text-[#E0001A] transition" x-text="project.name"></h3>
@@ -523,6 +276,11 @@
                                         <span class="opacity-80">기한까지 남은 개월수</span>
                                         <span class="font-extrabold" x-text="project.deliveryDate ? (calculateOrderWindow(project.deliveryDate).monthsLeft + '개월') : '-'"></span>
                                     </div>
+                                </div>
+                                <div class="flex flex-wrap gap-1.5 text-[9px]">
+                                    <span class="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold" x-text="`Drive ${getAbbMeta(project).driveScore}`"></span>
+                                    <span class="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold" x-text="`Motor ${getAbbMeta(project).motorScore}`"></span>
+                                    <span class="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-bold" x-text="`Power ${getAbbMeta(project).powerScore}`"></span>
                                 </div>
                                 <div class="space-y-1.5 border-t border-slate-100 pt-3 text-[11px]">
                                     <div class="flex items-center justify-between"><span class="text-slate-400 font-bold">발주기관</span><span class="font-bold text-slate-700 truncate max-w-[170px]" x-text="project.company || '-'"></span></div>
@@ -546,6 +304,9 @@
                                     <th class="py-3 px-4">지역</th>
                                     <th class="py-3 px-4">등록일</th>
                                     <th class="py-3 px-4">출처</th>
+                                    <th class="py-3 px-4 text-right">ABB</th>
+                                    <th class="py-3 px-4 text-right">Drive</th>
+                                    <th class="py-3 px-4 text-right">Motor</th>
                                     <th class="py-3 px-4 text-right">예산/금액</th>
                                 </tr>
                             </thead>
@@ -558,6 +319,9 @@
                                         <td class="py-3 px-4 text-slate-600" x-text="project.region || '-'"></td>
                                         <td class="py-3 px-4 font-semibold text-slate-700" x-text="project.registeredAt || '-'"></td>
                                         <td class="py-3 px-4 text-slate-600" x-text="project.sourceService"></td>
+                                        <td class="py-3 px-4 text-right font-extrabold text-slate-800" x-text="getAbbMeta(project).score"></td>
+                                        <td class="py-3 px-4 text-right font-extrabold text-slate-800" x-text="getAbbMeta(project).driveScore"></td>
+                                        <td class="py-3 px-4 text-right font-extrabold text-slate-800" x-text="getAbbMeta(project).motorScore"></td>
                                         <td class="py-3 px-4 text-right font-extrabold text-slate-800" x-text="formatBudget(project)"></td>
                                     </tr>
                                 </template>
@@ -592,19 +356,41 @@
                         <div class="bg-slate-50 rounded-xl p-5 border border-slate-100 space-y-4">
                             <h3 class="font-bold text-sm text-slate-800 flex items-center gap-1.5"><i data-lucide="building-2" class="text-[#E0001A] w-4.5 h-4.5"></i> 핵심 정보</h3>
                             <div class="space-y-3 text-xs">
-                                <div class="flex items-center justify-between"><span class="text-slate-400">기관명</span><span class="font-semibold text-slate-700" x-text="selectedProject.company || '-'"></span></div>
-                                <div class="flex items-center justify-between"><span class="text-slate-400">공고번호</span><span class="font-semibold text-slate-700" x-text="selectedProject.announcementNo || '-'"></span></div>
-                                <div class="flex items-center justify-between"><span class="text-slate-400">계약번호</span><span class="font-semibold text-slate-700" x-text="selectedProject.contractNo || '-'"></span></div>
-                                <div class="flex items-center justify-between"><span class="text-slate-400">프로젝트번호</span><span class="font-semibold text-slate-700" x-text="selectedProject.projectNo || '-'"></span></div>
-                                <div class="flex items-center justify-between"><span class="text-slate-400">지역</span><span class="font-semibold text-slate-700" x-text="selectedProject.region || '-'"></span></div>
-                                <div class="flex items-center justify-between"><span class="text-slate-400">등록일</span><span class="font-semibold text-slate-700" x-text="selectedProject.registeredAt || '-'"></span></div>
-                                <div class="flex items-center justify-between"><span class="text-slate-400">예산/금액</span><span class="font-bold text-blue-600" x-text="formatBudget(selectedProject)"></span></div>
-                                <div class="flex items-center justify-between"><span class="text-slate-400">키워드</span><span class="font-semibold text-slate-700" x-text="(selectedProject.matchedKeywords || []).join(', ') || '-'"></span></div>
+                                <template x-for="row in projectInfoRows(selectedProject)" :key="row.label">
+                                    <div class="flex items-center justify-between gap-3">
+                                        <span class="text-slate-400" x-text="row.label"></span>
+                                        <span class="font-semibold text-slate-700 text-right" :class="row.klass || ''" x-text="row.value"></span>
+                                    </div>
+                                </template>
+                            </div>
+                            <div class="border-t border-slate-200 pt-4 space-y-2">
+                                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">ABB 분석 키워드</div>
+                                <div class="flex flex-wrap gap-2">
+                                    <template x-for="kw in (selectedProject.matchedKeywords || [])" :key="kw">
+                                        <span class="px-2 py-1 rounded-full bg-white border border-slate-200 text-[11px] font-semibold text-slate-700" x-text="kw"></span>
+                                    </template>
+                                </div>
                             </div>
                         </div>
                         <div class="bg-slate-900 text-slate-100 rounded-xl p-5 border border-slate-800 space-y-4 shadow-inner">
-                            <div class="flex items-center gap-2"><i data-lucide="cpu" class="text-blue-400 w-4 h-4"></i><h4 class="text-xs font-bold uppercase tracking-wider text-slate-200">원본 데이터 Payload</h4></div>
-                            <pre class="text-xs text-slate-300 bg-slate-800/50 p-3 rounded-xl overflow-x-auto" x-text="formattedRaw(selectedProject)"></pre>
+                            <div class="flex items-center gap-2"><i data-lucide="cpu" class="text-blue-400 w-4 h-4"></i><h4 class="text-xs font-bold uppercase tracking-wider text-slate-200">ABB 타깃 분석</h4></div>
+                            <div class="grid grid-cols-3 gap-3">
+                                <div class="bg-slate-800/70 rounded-xl p-3 text-center"><div class="text-[10px] text-slate-400">ABB 종합</div><div class="text-lg font-black text-white" x-text="getAbbMeta(selectedProject).score"></div></div>
+                                <div class="bg-slate-800/70 rounded-xl p-3 text-center"><div class="text-[10px] text-slate-400">Drive</div><div class="text-lg font-black text-white" x-text="getAbbMeta(selectedProject).driveScore"></div></div>
+                                <div class="bg-slate-800/70 rounded-xl p-3 text-center"><div class="text-[10px] text-slate-400">Motor</div><div class="text-lg font-black text-white" x-text="getAbbMeta(selectedProject).motorScore"></div></div>
+                            </div>
+                            <div class="space-y-2 text-xs">
+                                <template x-for="row in projectPayloadRows(selectedProject)" :key="row.label">
+                                    <div class="flex items-start justify-between gap-3 border-b border-slate-800 pb-2">
+                                        <span class="text-slate-400 shrink-0" x-text="row.label"></span>
+                                        <span class="text-slate-100 text-right" x-text="row.value"></span>
+                                    </div>
+                                </template>
+                            </div>
+                            <details class="bg-slate-800/60 rounded-xl p-3">
+                                <summary class="cursor-pointer text-xs font-bold text-slate-200">원본 JSON 보기</summary>
+                                <pre class="text-xs text-slate-300 bg-slate-800/50 p-3 rounded-xl overflow-x-auto mt-3" x-text="formattedRaw(selectedProject)"></pre>
+                            </details>
                         </div>
                     </div>
                     <div class="space-y-3">
@@ -625,6 +411,5 @@
             </div>
         </template>
     </div>
-<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"4edd5f8ec12a48cfa682ab8261b80a79","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
 </body>
 </html>
