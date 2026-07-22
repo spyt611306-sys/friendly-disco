@@ -1,38 +1,98 @@
-[build]
-  publish = "."
+# 선박 영업기회 데이터 수집·판정 가이드
 
-[[redirects]]
-  from = "/api/*"
-  to = "https://friendly-disco-dstc.onrender.com/api/:splat"
-  status = 200
-  force = true
+## 수집 단계
 
-[[redirects]]
-  from = "/health"
-  to = "https://friendly-disco-dstc.onrender.com/health"
-  status = 200
-  force = true
+이 시스템은 특정 과거 프로젝트명에 의존하지 않고 다음 단계의 식별번호와 출처를 하나의 프로젝트로 연결합니다.
 
-[[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
+```text
+정책·예산/뉴스 신호
+  → 발주계획
+  → 조달요청
+  → 사전규격 및 첨부문서
+  → 입찰
+  → 평가·낙찰
+  → 계약
+  → 건조·개조
+  → 인도·후속함
+```
 
-[[headers]]
-  for = "/*"
-  [headers.values]
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://friendly-disco-dstc.onrender.com; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
-    Referrer-Policy = "strict-origin-when-cross-origin"
-    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
-    X-Content-Type-Options = "nosniff"
-    X-Frame-Options = "DENY"
+첨부된 조달청 명세서에서 반영한 핵심 오퍼레이션:
 
-[[headers]]
-  for = "/styles.css"
-  [headers.values]
-    Cache-Control = "public, max-age=31536000, immutable"
+- 발주계획: `getOrderPlanSttusListThng/Cnstwk/Servc/Frgcpt`
+- 조달요청: `getPrcrmntReqInfoListThng/Cnstwk/GnrlServc/TechServc`
+- 사전규격: `getPublicPrcureThngInfoThng/Servc/Cnstwk` 및 `getThngDetailMetaInfo*`
+- 표준정보: `getDataSetOpnStdBidPblancInfo`, `getDataSetOpnStdScsbidInfo`, `getDataSetOpnStdCntrctInfo`
+- 계약과정 연계: `getCntrctProcssIntgOpenThng/Servc/Cnstwk/Frgcpt`
 
-[[headers]]
-  for = "/index.html"
-  [headers.values]
-    Cache-Control = "no-cache, no-store, must-revalidate"
+발주계획은 과거 6개월뿐 아니라 향후 24개월의 예정계획도 조회합니다.
+
+## 관련성 판정
+
+단순한 `인버터` 검색은 태양광·건물설비를 대량 포함하고, 장비명만 검색하면 설계단계 선박을 놓칩니다. 따라서 다음 조합으로 판정합니다.
+
+1. 선박·해양 플랫폼 문맥: 관공선, 경비함, 지도선, 소방선, 여객선, 차도선, CTV/SOV, 해상풍력 등
+2. 프로젝트 신호: 대체건조, 신조, 기본·실시설계, 성능개량, 장비선정위원회 등
+3. 솔루션 신호: VFD/VSD, DC/DC, DC/AC, AC/DC, AFE, 추진모터, 발전기, PMS/EMS, ESS 등
+4. 발주기관·조선소 문맥
+5. 비선박 제외 신호: 학교 태양광 인버터, 방탄방패, 일반 건물설비 등
+
+기회 등급:
+
+- `P0 직접 장비`: 선박 문맥과 구체 장비 신호가 함께 확인됨
+- `P1 조기 관여`: 장비는 미정이나 설계·건조·조달요청 단계가 확인됨
+- `P2 감시 대상`: 선박·해양 프로젝트 가능성은 있으나 일정과 장비가 불명확
+- `P3 참고 자료`: 관련성이 약함. 삭제하지 않고 기본 목록에서만 숨김
+
+## 검증 근거 표시
+
+공식 API 레코드라고 해서 항상 클릭 가능한 나라장터 URL이 제공되는 것은 아닙니다.
+
+- `공식 원문`: API가 실제 상세 URL을 제공함
+- `공식 첨부문서`: 사전규격 규격서 URL을 제공함
+- `공식 API 레코드`: 식별번호는 있으나 원문 URL이 없음
+- `외부 뉴스`: 신규사업 발견과 일정변경 확인용
+
+원문 URL이 없는 경우 상세 화면은 API 주소를 공식 원문처럼 열지 않고, 공고번호·사전규격번호·조달요청번호·발주계획번호를 복사하도록 안내합니다.
+
+## 신규 프로젝트 발견 범위
+
+네이버 뉴스 검색 API의 기본 질의는 특정 함명 대신 범용 사업 유형을 사용합니다.
+
+```text
+관공선 건조
+경비함·경비정 건조
+국가어업지도선 건조
+소방선·소방정 건조
+연안여객선 신조·대체선
+차도선·도항선 건조
+하이브리드·전기추진 선박
+선박 인버터·컨버터·VFD·추진모터
+축발전기·DC Grid
+장비선정위원회
+해상풍력 CTV·SOV
+```
+
+뉴스는 발견 근거이며 계약 확정 근거가 아닙니다. 공식 API·기관 문서·공시와 교차 확인될 때만 `교차 검증` 상태가 됩니다.
+
+## 추가 공식 채널
+
+RSS/Atom을 제공하는 기관은 `PUBLIC_NOTICE_RSS_FEEDS`에 `기관명|URL` 형식으로 추가합니다. 우선순위는 다음과 같습니다.
+
+- 해양수산부 친환경선박 보급 시행계획
+- 해양경찰청 및 지방해양경찰청
+- 동해·서해·남해어업관리단
+- 소방청·중앙119구조본부
+- 지방해양수산청
+- 서울시 정보소통광장과 지방자치단체 고시공고
+- 조선소·전기추진 SI·한국선급의 공식 자료
+
+RSS가 없는 사이트를 무리하게 HTML 크롤링하기보다는 기관별 공개 API 또는 안정적인 목록 URL·선택자를 확인한 뒤 전용 수집기로 추가해야 합니다.
+
+## 운영 점검 기준
+
+- P0: 매일 확인, 3영업일 이내 다음 행동 지정
+- P1: 주 2회 확인, 설계사·담당부서·사전규격 예정일 확보
+- P2: 주 1회 확인, 예산·발주계획·선령 변화 감시
+- P3: 월 1회 오분류 검토
+- 링크 없는 공식 API 레코드: 번호로 나라장터 원문을 수동 확인하고 메모에 결과 기록
+

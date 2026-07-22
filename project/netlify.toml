@@ -1,5 +1,4 @@
 [build]
-  base = "project"
   publish = "."
 
 [[redirects]]
@@ -27,6 +26,11 @@
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
     X-Content-Type-Options = "nosniff"
     X-Frame-Options = "DENY"
+
+[[headers]]
+  for = "/styles.css"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
 
 [[headers]]
   for = "/index.html"

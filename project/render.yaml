@@ -3,7 +3,6 @@ services:
     name: friendly-disco
     env: python
     plan: free
-    rootDir: project
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
@@ -77,3 +76,13 @@ services:
         value: "8"
       - key: DOCUMENT_MAX_ATTACHMENTS_PER_PROJECT
         value: "2"
+      - key: SHIP_OPERATION_PORT_CODES
+        sync: false
+      - key: SHIP_SUPPORT_VSSL_NAMES
+        sync: false
+      - key: SHIP_WATCHLIST_TERMS
+        value: 3019함,3020함,소방501,소방502,무궁화21호,무궁화41호,한강버스
+      - key: SHIPYARD_WATCHLIST
+        value: 금하네이벌텍,동남중공업,삼원중공업,코리아월드써비스,신진조선,대선조선,HJ중공업,에이치제이중공업,대한조선,세진중공업
+      - key: VESSEL_BUILD_WATCHLIST
+        value: 대체건조,신조,제작구매,개조,성능개량,전기추진,하이브리드 전기추진,친환경선박,기본설계,실시설계,장비선정위원회

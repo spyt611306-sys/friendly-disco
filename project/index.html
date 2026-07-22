@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="국내 관공선·특수선·연안선박의 추진 및 전력변환 영업기회 모니터링">
+  <meta name="theme-color" content="#111827">
+  <title>Marine Sales Intelligence</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%23e30613'/><path d='M11 39h42L44 51H21zM25 13h14v9h7v13H18V22h7z' fill='white'/></svg>">
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/app.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
+</head>
+<body>
+<div class="app-shell" x-data="sdiApp()" x-init="init()" @keydown.escape.window="closeOverlays()" x-cloak>
+  <div class="mobile-scrim" x-show="mobileNav" x-transition.opacity @click="mobileNav=false"></div>
+
+  <aside class="sidebar" :class="{'collapsed':sidebarCollapsed,'mobile-open':mobileNav}">
+    <div class="sidebar-brand">
+      <div class="brand-symbol"><i data-lucide="waves"></i></div>
+      <div class="brand-copy">
+        <span>ABB MARINE SALES</span>
+        <strong>Opportunity Radar</strong>
+      </div>
+      <button class="sidebar-collapse" type="button" @click="toggleSidebar()" :aria-label="sidebarCollapsed?'메뉴 펼치기':'메뉴 접기'">
+        <i :data-lucide="sidebarCollapsed?'panel-left-open':'panel-left-close'"></i>
+      </button>
+    </div>
+
+    <nav class="smart-nav" aria-label="프로젝트 보기">
+      <p class="nav-caption">영업 보기</p>
+      <template x-for="item in smartViews" :key="item.key">
+        <button type="button" class="nav-item" :class="{'active':filters.smart===item.key}" @click="setSmartView(item.key)">
+          <i :data-lucide="item.icon"></i>
+          <span x-text="item.label"></span>
+          <b x-text="smartCount(item.key)"></b>
+        </button>
+      </template>
+    </nav>
+
+    <div class="sidebar-divider"></div>
+
+    <section class="sidebar-sources">
+      <p class="nav-caption">데이터 상태</p>
+      <div class="source-health-row">
+        <span class="health-dot" :class="healthStatus"></span>
+        <div><strong x-text="healthLabel"></strong><small x-text="lastSyncLabel"></small></div>
+      </div>
+      <div class="source-mini-grid">
+        <div><strong x-text="channels.filter(x=>x.configured).length"></strong><span>연결 채널</span></div>
+        <div><strong x-text="kpis.evidence"></strong><span>확인 근거</span></div>
+      </div>
+    </section>
+
+    <div class="sidebar-footer">
+      <button type="button" class="button button-primary button-block" @click="openCollectCenter()">
+        <i data-lucide="database-zap"></i><span>수집 센터</span>
+      </button>
+      <small>made by Minsu Kim</small>
+    </div>
+  </aside>
+
+  <div class="workspace">
+    <header class="workspace-header">
+      <button type="button" class="icon-button mobile-menu" @click="mobileNav=true" aria-label="메뉴 열기"><i data-lucide="menu"></i></button>
+      <div class="global-search">
+        <i data-lucide="search"></i>
+        <input type="search" x-model.debounce.250ms="filters.query" placeholder="선박명, 기관, 공고번호, VFD·DC/DC·추진모터 검색" aria-label="프로젝트 검색">
+        <kbd>Ctrl K</kbd>
+      </div>
+      <div class="header-actions">
+        <span class="desktop-only status-pill"><span class="health-dot" :class="healthStatus"></span><span x-text="healthLabel"></span></span>
+        <button type="button" class="icon-button" @click="refreshData()" :disabled="loading" aria-label="새로고침"><i data-lucide="refresh-cw" :class="{'spin':loading}"></i></button>
+        <button type="button" class="button button-dark desktop-only" @click="runCollection()" :disabled="job.running"><i data-lucide="radar"></i><span x-text="job.running?'수집 중':'전체 수집'"></span></button>
+      </div>
+    </header>
+
+    <main class="content">
+      <section class="page-heading">
+        <div>
+          <p class="section-kicker">MARINE ELECTRIFICATION PIPELINE</p>
+          <h1>선박 영업기회</h1>
+          <p>VFD·인버터·컨버터·추진모터·발전기 적용 가능성과 사양 반영 타이밍을 우선해서 보여줍니다.</p>
+        </div>
+        <div class="page-actions">
+          <button type="button" class="button button-secondary" @click="enableNotifications()"><i data-lucide="bell-ring"></i>일정 알림</button>
+          <div class="export-menu">
+            <button type="button" class="button button-secondary" @click="exportCsv()"><i data-lucide="file-spreadsheet"></i>CSV</button>
+            <button type="button" class="icon-button" @click="exportJson()" aria-label="JSON 내보내기"><i data-lucide="braces"></i></button>
+          </div>
+        </div>
+      </section>
+
+      <div class="notice notice-error" x-show="errorMessage">
+        <i data-lucide="circle-alert"></i>
+        <div><strong>데이터를 불러오지 못했습니다.</strong><span x-text="errorMessage"></span></div>
+        <button type="button" class="button button-secondary" @click="refreshData()">다시 시도</button>
+      </div>
+
+      <section class="kpi-grid" aria-label="영업 현황">
+        <article class="kpi-card accent-red">
+          <div class="kpi-icon"><i data-lucide="crosshair"></i></div>
+          <div><span>직접 장비 기회</span><strong><b x-text="kpis.direct"></b>건</strong><small>공식 문서 또는 제목에서 장비 신호</small></div>
+        </article>
+        <article class="kpi-card accent-amber">
+          <div class="kpi-icon"><i data-lucide="telescope"></i></div>
+          <div><span>조기 관여 기회</span><strong><b x-text="kpis.early"></b>건</strong><small>설계·발주계획·조달요청 단계</small></div>
+        </article>
+        <article class="kpi-card accent-blue">
+          <div class="kpi-icon"><i data-lucide="link-2"></i></div>
+          <div><span>원문 확인 가능</span><strong><b x-text="kpis.directEvidence"></b>건</strong><small>공식 원문·규격서 바로가기 보유</small></div>
+        </article>
+        <article class="kpi-card accent-green">
+          <div class="kpi-icon"><i data-lucide="calendar-clock"></i></div>
+          <div><span>14일 내 액션</span><strong><b x-text="kpis.due"></b>건</strong><small x-text="`${kpis.overdue}건 기한 경과`"></small></div>
+        </article>
+      </section>
+
+      <section class="stage-strip" aria-label="프로젝트 단계 필터">
+        <button type="button" :class="{'active':filters.stage==='ALL'}" @click="filters.stage='ALL'"><span>전체 단계</span><b x-text="projects.length"></b></button>
+        <template x-for="stage in stages" :key="stage">
+          <button type="button" :class="{'active':filters.stage===stage}" @click="filters.stage=stage">
+            <span x-text="stageLabel(stage)"></span><b x-text="projectsByStage(stage).length"></b>
+          </button>
+        </template>
+      </section>
+
+      <section class="filter-panel">
+        <div class="filter-row">
+          <label><span>기회 등급</span><select x-model="filters.opportunity"><option value="ALL">전체</option><option value="P0">P0 직접 장비</option><option value="P1">P1 조기 관여</option><option value="P2">P2 감시</option><option value="P3">P3 참고</option></select></label>
+          <label><span>솔루션</span><select x-model="filters.solution"><option value="ALL">전체 솔루션</option><template x-for="value in solutionOptions"><option :value="value" x-text="value"></option></template></select></label>
+          <label><span>데이터 출처</span><select x-model="filters.source"><option value="ALL">전체 출처</option><template x-for="value in sourceOptions"><option :value="value" x-text="sourceTypeLabel(value)"></option></template></select></label>
+          <label><span>근거 상태</span><select x-model="filters.evidence"><option value="ALL">전체</option><option value="DIRECT">원문 확인 가능</option><option value="API_ONLY">API만 확인</option><option value="VERIFIED">교차·공식 검증</option><option value="REVIEW">검토 필요</option></select></label>
+          <label><span>정렬</span><select x-model="filters.sort"><option value="SCORE">영업기회 높은 순</option><option value="UPDATED">최신 수집 순</option><option value="ACTION">다음 액션 순</option><option value="VALUE">사업금액 순</option></select></label>
+          <button type="button" class="button button-quiet reset-filter" @click="resetFilters()"><i data-lucide="rotate-ccw"></i>초기화</button>
+        </div>
+        <div class="active-filter-row">
+          <label class="switch"><input type="checkbox" x-model="filters.hideReference"><span></span><b>P3 참고자료 숨기기</b></label>
+          <label class="switch"><input type="checkbox" x-model="filters.favorite"><span></span><b>관심 프로젝트만</b></label>
+          <div class="result-summary"><strong x-text="filteredProjects.length"></strong>개 프로젝트 <span>·</span> <span x-text="filterSummary"></span></div>
+          <div class="view-switch">
+            <button type="button" :class="{'active':view==='list'}" @click="view='list'"><i data-lucide="list"></i>리스트</button>
+            <button type="button" :class="{'active':view==='board'}" @click="view='board'"><i data-lucide="columns-3"></i>파이프라인</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="project-list" x-show="view==='list'">
+        <div class="list-head desktop-only">
+          <span>영업기회 / 프로젝트</span><span>근거·진행상태</span><span>다음 행동</span><span></span>
+        </div>
+        <template x-if="loading"><div class="loading-state"><span class="loader"></span><strong>프로젝트를 정리하고 있습니다.</strong><p>수집 근거와 영업기회 점수를 계산하는 중입니다.</p></div></template>
+        <template x-for="project in filteredProjects" :key="project.dedupeKey||project.id">
+          <article class="project-row" @click="openProject(project)" tabindex="0" @keydown.enter="openProject(project)">
+            <div class="project-main">
+              <div class="opportunity-rank" :class="opportunityClass(project.opportunityClass)"><strong x-text="project.opportunityClass"></strong><span x-text="opportunityLabel(project.opportunityClass)"></span></div>
+              <div class="project-copy">
+                <div class="project-badges">
+                  <span class="badge badge-stage" x-text="stageLabel(project.stage)"></span>
+                  <span class="badge" :class="verificationClass(project.verificationStatus)" x-text="verificationLabel(project.verificationStatus)"></span>
+                  <span class="badge badge-warning" x-show="project.evidence.apiOnlyCount && !project.evidence.directOfficialCount">원문 링크 없음</span>
+                </div>
+                <h2 x-text="project.name"></h2>
+                <p class="project-meta"><span><i data-lucide="building-2"></i><b x-text="project.company"></b></span><span x-show="project.region"><i data-lucide="map-pin"></i><b x-text="project.region"></b></span><span x-show="project.registeredAt"><i data-lucide="calendar-days"></i><b x-text="formatDate(project.registeredAt)"></b></span></p>
+                <p class="sales-reason" x-text="project.salesReasons[0]||'선박 프로젝트 관련성을 확인하고 있습니다.'"></p>
+                <div class="chip-row"><template x-for="area in project.solutionAreas.slice(0,4)" :key="area"><span class="solution-chip" x-text="area"></span></template><span class="solution-chip muted-chip" x-show="!project.solutionAreas.length">장비 사양 미확정</span></div>
+              </div>
+            </div>
+            <div class="project-evidence">
+              <div class="evidence-line"><i data-lucide="file-check-2"></i><div><strong x-text="evidenceHeadline(project)"></strong><span x-text="evidenceSubline(project)"></span></div></div>
+              <div class="score-line"><span>ABB 적합도</span><div class="score-bar"><i :style="`width:${project.abbScore}%`"></i></div><strong x-text="project.abbScore"></strong></div>
+            </div>
+            <div class="project-action">
+              <span class="action-date" :class="dueInfo(project).className" x-text="dueInfo(project).short"></span>
+              <strong x-text="project.nextAction||project.recommendedAction"></strong>
+              <small x-text="project.nextActionDate?formatDate(project.nextActionDate):'액션일 미지정'"></small>
+            </div>
+            <div class="row-actions">
+              <button type="button" class="icon-button" :class="{'favorite':project.favorite}" @click.stop="toggleFavorite(project)" :aria-label="project.favorite?'관심 해제':'관심 등록'"><i data-lucide="star"></i></button>
+              <button type="button" class="open-row" @click.stop="openProject(project)" aria-label="상세 보기"><i data-lucide="chevron-right"></i></button>
+            </div>
+          </article>
+        </template>
+        <template x-if="!loading && !filteredProjects.length"><div class="empty-state"><div><i data-lucide="scan-search"></i></div><strong>조건에 맞는 프로젝트가 없습니다.</strong><p>필터를 초기화하거나 P2 감시 프로젝트까지 범위를 넓혀보세요.</p><button type="button" class="button button-secondary" @click="resetFilters()">필터 초기화</button></div></template>
+      </section>
+
+      <section class="pipeline-board" x-show="view==='board'">
+        <template x-for="stage in stages" :key="stage">
+          <div class="board-lane">
+            <header><span x-text="stageLabel(stage)"></span><b x-text="filteredProjects.filter(p=>p.stage===stage).length"></b></header>
+            <template x-for="project in filteredProjects.filter(p=>p.stage===stage)" :key="project.id">
+              <button type="button" class="board-card" @click="openProject(project)">
+                <div><span :class="opportunityClass(project.opportunityClass)" x-text="project.opportunityClass"></span><b x-text="project.abbScore"></b></div>
+                <strong x-text="project.name"></strong><small x-text="project.company"></small>
+                <p x-text="project.salesReasons[0]||project.recommendedAction"></p>
+                <footer><span x-text="evidenceHeadline(project)"></span><i data-lucide="arrow-up-right"></i></footer>
+              </button>
+            </template>
+          </div>
+        </template>
+      </section>
+    </main>
+  </div>
+
+  <div class="drawer-backdrop" x-show="selectedProject" x-transition.opacity @click="closeProject()"></div>
+  <aside class="detail-drawer" x-show="selectedProject" x-transition:enter="drawer-enter" x-transition:enter-start="drawer-enter-start" x-transition:enter-end="drawer-enter-end">
+    <template x-if="selectedProject">
+      <div class="drawer-layout">
+        <header class="drawer-header">
+          <div class="drawer-badges"><span class="badge badge-stage" x-text="stageLabel(selectedProject.stage)"></span><span class="badge" :class="opportunityClass(selectedProject.opportunityClass)" x-text="`${selectedProject.opportunityClass} · ${opportunityLabel(selectedProject.opportunityClass)}`"></span></div>
+          <h2 x-text="selectedProject.name"></h2>
+          <p><span x-text="selectedProject.company"></span><span x-show="primaryIdentifier"> · </span><span class="mono" x-text="primaryIdentifier"></span></p>
+          <div class="drawer-header-actions">
+            <button type="button" class="icon-button dark-icon" :class="{'favorite':selectedProject.favorite}" @click="toggleFavorite(selectedProject)"><i data-lucide="star"></i></button>
+            <button type="button" class="icon-button dark-icon" @click="closeProject()" aria-label="상세 닫기"><i data-lucide="x"></i></button>
+          </div>
+        </header>
+
+        <div class="drawer-score-strip">
+          <div><span>영업 적합도</span><strong x-text="selectedProject.abbScore"></strong></div>
+          <div><span>드라이브</span><strong x-text="selectedProject.driveScore"></strong></div>
+          <div><span>모터·추진</span><strong x-text="selectedProject.motorScore"></strong></div>
+          <div><span>전력·ESS</span><strong x-text="selectedProject.powerScore"></strong></div>
+        </div>
+
+        <nav class="drawer-tabs">
+          <button type="button" :class="{'active':detailTab==='summary'}" @click="setDetailTab('summary')">핵심 요약</button>
+          <button type="button" :class="{'active':detailTab==='evidence'}" @click="setDetailTab('evidence')">검증 근거 <b x-text="selectedProject.sources.length"></b></button>
+          <button type="button" :class="{'active':detailTab==='followup'}" @click="setDetailTab('followup')">영업 팔로업</button>
+          <button type="button" :class="{'active':detailTab==='raw'}" @click="setDetailTab('raw')">원본 데이터</button>
+        </nav>
+
+        <div class="drawer-content">
+          <section x-show="detailTab==='summary'" class="detail-section">
+            <div class="sales-brief" :class="opportunityClass(selectedProject.opportunityClass)">
+              <div class="brief-icon"><i data-lucide="badge-dollar-sign"></i></div>
+              <div><span>이 프로젝트를 보는 이유</span><h3 x-text="opportunityBrief(selectedProject)"></h3><ul><template x-for="reason in selectedProject.salesReasons" :key="reason"><li x-text="reason"></li></template></ul></div>
+            </div>
+
+            <div class="recommended-action">
+              <div><i data-lucide="move-right"></i><span>지금 할 일</span></div>
+              <strong x-text="selectedProject.nextAction||selectedProject.recommendedAction"></strong>
+              <p x-text="stageGuidance(selectedProject.stage)"></p>
+            </div>
+
+            <div class="section-title"><div><span>적용 가능 솔루션</span><h3>예상 장비 범위</h3></div></div>
+            <div class="solution-grid">
+              <template x-for="area in selectedProject.solutionAreas" :key="area"><div class="solution-box"><i :data-lucide="solutionIcon(area)"></i><strong x-text="area"></strong><span>관련 키워드 및 문서 근거 확인</span></div></template>
+              <div class="solution-empty" x-show="!selectedProject.solutionAreas.length"><i data-lucide="circle-help"></i><div><strong>장비 사양이 아직 공개되지 않았습니다.</strong><span>설계·계획 단계라면 오히려 사양 반영 가능성이 있으므로 관심 프로젝트로 관리하세요.</span></div></div>
+            </div>
+
+            <div class="section-title"><div><span>PROJECT FACTS</span><h3>조달 핵심 정보</h3></div></div>
+            <dl class="fact-grid">
+              <div><dt>진행 단계</dt><dd x-text="stageLabel(selectedProject.stage)"></dd></div>
+              <div><dt>발주·수요기관</dt><dd x-text="selectedProject.company"></dd></div>
+              <div><dt>추정 사업금액</dt><dd x-text="formatMoney(selectedProject.orderValue,selectedProject.currency)"></dd></div>
+              <div><dt>지역</dt><dd x-text="selectedProject.region||'공개 정보 없음'"></dd></div>
+              <div><dt>등록일</dt><dd x-text="formatDate(selectedProject.registeredAt)"></dd></div>
+              <div><dt>납기·인도 예정</dt><dd x-text="formatDate(selectedProject.deliveryDate)"></dd></div>
+              <div><dt>조선소·계약업체</dt><dd x-text="selectedProject.shipyard||'미정/미공개'"></dd></div>
+              <div><dt>공식 식별번호</dt><dd class="mono" x-text="primaryIdentifier||'미확인'"></dd></div>
+            </dl>
+
+            <div class="risk-box" x-show="selectedProject.riskFlags.length"><i data-lucide="shield-alert"></i><div><strong>확인할 점</strong><ul><template x-for="risk in selectedProject.riskFlags" :key="risk"><li x-text="risk"></li></template></ul></div></div>
+            <div class="keyword-cloud"><template x-for="keyword in selectedProject.matchedKeywords" :key="keyword"><span x-text="keyword"></span></template></div>
+          </section>
+
+          <section x-show="detailTab==='evidence'" class="detail-section">
+            <div class="evidence-overview">
+              <div><span>검증 상태</span><strong x-text="verificationLabel(selectedProject.verificationStatus)"></strong><small x-text="selectedProject.verificationReason||'공식 API와 외부 뉴스 근거를 평가합니다.'"></small></div>
+              <div class="confidence-ring" :style="`--score:${selectedProject.verificationConfidence}`"><strong x-text="selectedProject.verificationConfidence"></strong><span>신뢰도</span></div>
+            </div>
+            <div class="evidence-stats">
+              <div><i data-lucide="landmark"></i><strong x-text="selectedProject.evidence.officialCount"></strong><span>공식 근거</span></div>
+              <div><i data-lucide="external-link"></i><strong x-text="selectedProject.evidence.directOfficialCount"></strong><span>원문 링크</span></div>
+              <div><i data-lucide="files"></i><strong x-text="selectedProject.evidence.attachmentCount"></strong><span>첨부 규격서</span></div>
+              <div><i data-lucide="newspaper"></i><strong x-text="selectedProject.newsEvidenceCount"></strong><span>뉴스 근거</span></div>
+            </div>
+            <div class="notice notice-warning compact" x-show="selectedProject.evidence.apiOnlyCount && !selectedProject.evidence.directOfficialCount">
+              <i data-lucide="link-2-off"></i><div><strong>공식 API 레코드는 있으나 원문 URL이 제공되지 않았습니다.</strong><span>아래 식별번호를 복사해 나라장터에서 검색하면 원문을 확인할 수 있습니다.</span></div><button type="button" class="button button-secondary" @click="copyText(primaryIdentifier||selectedProject.name)">검색어 복사</button>
+            </div>
+            <div class="verification-actions"><button type="button" class="button button-primary" @click="verifySelectedProject()" :disabled="verifying"><i data-lucide="shield-check" :class="{'spin':verifying}"></i><span x-text="verifying?'재검증 중':'뉴스·공식근거 재검증'"></span></button><span x-text="selectedProject.verificationCheckedAt?`최근 검증 ${formatDateTime(selectedProject.verificationCheckedAt)}`:'아직 수동 재검증하지 않음'"></span></div>
+
+            <div class="section-title"><div><span>EVIDENCE SOURCES</span><h3>확인 가능한 근거</h3></div></div>
+            <div class="evidence-list">
+              <template x-for="source in selectedProject.sources" :key="source.id||source.url||source.title">
+                <article class="evidence-card" :class="{'unlinked':!sourceCanOpen(source)}">
+                  <div class="evidence-source-icon"><i :data-lucide="sourceIcon(source)"></i></div>
+                  <div class="evidence-source-copy"><div><span class="source-type" x-text="sourceKindLabel(source)"></span><span class="analysis-badge" x-show="source.analysisStatus==='ANALYZED'">본문 분석 완료</span></div><strong x-text="source.title||'제목 없음'"></strong><p x-text="source.summary||source.publisher||source.operation||'요약 정보 없음'"></p><small><span x-text="source.publisher||source.provider||'-'"></span><span> · </span><span x-text="formatDate(source.date)"></span></small></div>
+                  <a class="button button-secondary" x-show="sourceCanOpen(source)" :href="safeUrl(source.url)" target="_blank" rel="noopener noreferrer" @click.stop><span x-text="source.evidenceKind==='OFFICIAL_ATTACHMENT'?'문서 열기':'원문 확인'"></span><i data-lucide="arrow-up-right"></i></a>
+                  <button type="button" class="button button-quiet" x-show="!sourceCanOpen(source)" @click="copyEvidenceReference(source)"><i data-lucide="copy"></i>번호 복사</button>
+                </article>
+              </template>
+            </div>
+            <template x-if="!selectedProject.sources.length"><div class="empty-inline"><i data-lucide="file-question"></i><strong>표시할 근거가 없습니다.</strong><span>재검증을 실행하거나 수집 채널을 확인하세요.</span></div></template>
+
+            <div class="notice notice-warning compact" x-show="selectedProject.verificationWarnings.length"><i data-lucide="triangle-alert"></i><div><strong>검증 경고</strong><template x-for="warning in selectedProject.verificationWarnings" :key="warning"><span x-text="warning"></span></template></div></div>
+          </section>
+
+          <section x-show="detailTab==='followup'" class="detail-section">
+            <div class="section-title"><div><span>SALES FOLLOW-UP</span><h3>담당자와 다음 행동</h3></div></div>
+            <form class="followup-form" @submit.prevent="saveFollowup()">
+              <label><span>프로젝트 단계</span><select x-model="followup.stage"><template x-for="stage in stages"><option :value="stage" x-text="stageLabel(stage)"></option></template></select></label>
+              <label><span>영업 담당자</span><input type="text" x-model.trim="followup.owner" maxlength="100" placeholder="담당자 이름"></label>
+              <label><span>다음 행동일</span><input type="date" x-model="followup.nextActionDate"></label>
+              <label class="full"><span>다음 행동</span><input type="text" x-model.trim="followup.nextAction" maxlength="500" :placeholder="selectedProject.recommendedAction"></label>
+              <label class="full"><span>영업 메모</span><textarea x-model.trim="followup.notes" maxlength="4000" rows="8" placeholder="설계사, 조선소, 의사결정자, 요청 사양과 연락 결과를 기록하세요."></textarea></label>
+              <label class="favorite-check full"><input type="checkbox" x-model="followup.favorite"><span><i data-lucide="star"></i>관심 프로젝트로 상단에 고정</span></label>
+              <div class="form-actions full"><button type="button" class="button button-secondary" @click="applyRecommendedAction()">추천 행동 적용</button><button type="submit" class="button button-primary" :disabled="savingFollowup"><i data-lucide="save"></i><span x-text="savingFollowup?'저장 중':'팔로업 저장'"></span></button></div>
+            </form>
+            <div class="section-title"><div><span>HISTORY</span><h3>프로젝트 이력</h3></div></div>
+            <ol class="timeline"><template x-for="event in selectedProject.history.slice().reverse()" :key="event.id||event.date+event.action"><li><i></i><div><span x-text="formatDate(event.date)"></span><strong x-text="historyLabel(event.action)"></strong><p x-text="event.detail"></p></div></li></template></ol>
+          </section>
+
+          <section x-show="detailTab==='raw'" class="detail-section">
+            <div class="developer-warning"><i data-lucide="code-2"></i><div><strong>개발자·데이터 점검용 원본</strong><span>일반적인 영업 검토에는 핵심 요약과 검증 근거 탭을 이용하세요.</span></div></div>
+            <pre class="raw-json" x-text="JSON.stringify(selectedProject.rawPayload,null,2)"></pre>
+          </section>
+        </div>
+      </div>
+    </template>
+  </aside>
+
+  <div class="modal-backdrop" x-show="showCollect" x-transition.opacity @click="closeCollectCenter()"></div>
+  <section class="collect-modal" x-show="showCollect" x-transition>
+    <header><div><span>DATA COLLECTION</span><h2>수집·검증 센터</h2></div><button type="button" class="icon-button dark-icon" @click="closeCollectCenter()"><i data-lucide="x"></i></button></header>
+    <div class="collect-body">
+      <div class="job-summary"><div><span class="health-dot" :class="job.running?'running':job.status==='SUCCESS'?'healthy':'idle'"></span><div><strong x-text="job.message||'대기 중'"></strong><small x-text="job.currentStep?`현재 채널: ${collectorLabel(job.currentStep)}`:'필요한 채널만 개별 실행할 수도 있습니다.'"></small></div></div><b x-text="`${job.progress||0}%`"></b></div>
+      <div class="progress-track"><i :style="`width:${job.progress||0}%`"></i></div>
+      <div class="collect-actions"><button type="button" class="button button-primary" @click="runCollection()" :disabled="job.running"><i data-lucide="play"></i>전체 파이프라인</button><button type="button" class="button button-secondary" @click="resetJob()" :disabled="job.running">상태 초기화</button><button type="button" class="button button-quiet" @click="changeAdminKey()">관리자 키 변경</button></div>
+      <div class="channel-grid"><template x-for="channel in channels" :key="channel.alias"><article><span class="channel-icon" :class="{'ready':channel.configured}"><i :data-lucide="collectorIcon(channel.alias)"></i></span><div><strong x-text="collectorLabel(channel.alias)"></strong><small x-text="channel.configured?'실행 가능':'설정 필요 또는 선택 채널'"></small></div><button type="button" class="button button-secondary" @click="runCollection(channel.alias)" :disabled="job.running||channel.alias==='incheon_port'">실행</button></article></template></div>
+      <div class="job-errors" x-show="(job.errors||[]).length"><template x-for="item in job.errors"><p><strong x-text="collectorLabel(item.collector)"></strong><span x-text="item.message"></span></p></template></div>
+      <div class="job-log" x-show="jobLogs.length"><template x-for="(line,index) in jobLogs" :key="index"><p x-text="line"></p></template></div>
+    </div>
+  </section>
+
+  <div class="toast" x-show="toast" x-transition x-text="toast"></div>
+</div>
+</body>
+</html>

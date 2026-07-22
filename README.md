@@ -1,88 +1,100 @@
-services:
-  - type: web
-    name: friendly-disco
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /health
-    autoDeploy: true
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
-      - key: STRICT_STARTUP
-        value: "true"
-      - key: ALLOWED_ORIGINS
-        value: https://marinesalesbyminsu.netlify.app,http://localhost:8000,http://127.0.0.1:8000
-      - key: DATABASE_URL
-        sync: false
-      - key: DATA_GO_KR_API_KEY
-        sync: false
-      - key: PUBLIC_DATA_API_KEY
-        sync: false
-      - key: SHIP_API_KEY
-        sync: false
-      - key: ADMIN_API_KEY
-        sync: false
-      - key: NAVER_CLIENT_ID
-        sync: false
-      - key: NAVER_CLIENT_SECRET
-        sync: false
-      - key: VERIFY_AFTER_COLLECT
-        value: "true"
-      - key: VERIFY_MAX_PROJECTS
-        value: "30"
-      - key: GOOGLE_NEWS_VERIFY_ENABLED
-        value: "true"
-      - key: SALES_SIGNAL_MAX_QUERIES
-        value: "20"
-      - key: SALES_SIGNAL_RESULTS_PER_QUERY
-        value: "30"
-      - key: NEWS_RSS_FEEDS
-        sync: false
-      - key: PUBLIC_NOTICE_RSS_FEEDS
-        sync: false
-      - key: COLLECTOR_TIMEOUT_SECONDS
-        value: "300"
-      - key: G2B_WINDOW_DAYS
-        value: "30"
-      - key: BID_LOOKBACK_DAYS
-        value: "365"
-      - key: CONTRACT_LOOKBACK_DAYS
-        value: "365"
-      - key: PRESPEC_LOOKBACK_DAYS
-        value: "365"
-      - key: PROCUREMENT_REQUEST_LOOKBACK_DAYS
-        value: "365"
-      - key: AWARD_LOOKBACK_DAYS
-        value: "180"
-      - key: PUBLIC_DATA_LOOKBACK_DAYS
-        value: "30"
-      - key: ORDER_PLAN_LOOKBACK_MONTHS
-        value: "6"
-      - key: ORDER_PLAN_FUTURE_MONTHS
-        value: "24"
-      - key: DEFAULT_PIPELINE_ALIASES
-        value: order_plan,procurement_request,prespec,bid,award,contract,public_data,market_signal,news,public_notice,ship_support,integrated_process
-      - key: MAX_PAGES_PER_OPERATION
-        value: "10"
-      - key: MAX_ITEMS_PER_OPERATION
-        value: "1000"
-      - key: INTEGRATED_PROCESS_MAX_PROJECTS
-        value: "40"
-      - key: DOCUMENT_ANALYSIS_ENABLED
-        value: "true"
-      - key: DOCUMENT_MAX_PROJECTS_PER_RUN
-        value: "8"
-      - key: DOCUMENT_MAX_ATTACHMENTS_PER_PROJECT
-        value: "2"
-      - key: SHIP_OPERATION_PORT_CODES
-        sync: false
-      - key: SHIP_SUPPORT_VSSL_NAMES
-        sync: false
-      - key: SHIP_WATCHLIST_TERMS
-        value: 3019함,3020함,소방501,소방502,무궁화21호,무궁화41호,한강버스
-      - key: SHIPYARD_WATCHLIST
-        value: 금하네이벌텍,동남중공업,삼원중공업,코리아월드써비스,신진조선,대선조선,HJ중공업,에이치제이중공업,대한조선,세진중공업
-      - key: VESSEL_BUILD_WATCHLIST
-        value: 대체건조,신조,제작구매,개조,성능개량,전기추진,하이브리드 전기추진,친환경선박,기본설계,실시설계,장비선정위원회
+# Marine Sales Intelligence 3.2
+
+국내 관공선·특수선·연안여객선·해상풍력 지원선의 발주계획부터 건조까지 수집하고, VFD·인버터·컨버터·모터·발전기 영업 관여 시점을 관리하는 대시보드입니다.
+
+## 이번 버전의 핵심 변경
+
+- 공통 수집기 문법 오류와 누락 메서드를 복구하고 JSON/XML 응답, 페이지네이션, 재시도, 타임아웃을 통합했습니다.
+- 원본에 없는 조선소·납기·선박 제원을 임의 생성하지 않습니다. 수집된 사실과 영업 추정 점수를 분리합니다.
+- 공고번호/계약번호/프로젝트번호/정규화 지문으로 중복을 병합하고 출처와 이력을 누적합니다.
+- 8단계 파이프라인과 담당자, 다음 액션, 메모, 관심 프로젝트를 PostgreSQL에 저장합니다.
+- 수집/초기화/팔로업/원시 API 호출을 `ADMIN_API_KEY`로 보호합니다.
+- 뉴스 및 기관 공고 RSS/Atom 채널을 환경 변수로 추가할 수 있습니다.
+- 공식 조달 근거와 네이버 뉴스/Google News RSS 근거를 교차 평가하고 상세 화면에서 수동 재검증할 수 있습니다.
+- 반응형 목록·스테이지 보드, 복합 필터, 일정 카운트다운, CSV/JSON 내보내기, 브라우저 알림을 제공합니다.
+- 기존의 데이터 전체 삭제 SQL을 제거하고 안전한 멱등 스키마를 제공합니다.
+- 첨부된 조달청 명세에 맞춰 `ServiceKey`, 발주계획 `bizNm`, 조달요청 12개 오퍼레이션과 계약과정 통합연계를 반영했습니다.
+- 발주계획은 향후 24개월까지 확인하고, 사전규격 PDF/HWP/HWPX/DOCX/XLSX의 장비 키워드를 제한적으로 분석합니다.
+- 특정 과거 프로젝트명 대신 관공선·여객선·CTV/SOV와 전력변환/추진 솔루션을 조합한 P0~P3 기회등급을 사용합니다.
+- 네이버 뉴스 API에서 범용 선박 영업신호를 직접 발견하고 공식 조달 근거와 분리해 저장합니다.
+- 프로젝트 상세 화면은 핵심 영업요약, 지금 할 일, 공식 원문/첨부문서, API-only 근거를 명확하게 구분합니다.
+
+## 구조
+
+```text
+project/
+├── main.py                 FastAPI, DB 병합/조회/팔로업/수집 작업
+├── collector/              G2B·해수부·뉴스·문서 분석 수집기
+├── index.html              대시보드 마크업
+├── app.js                  Alpine.js 상태·필터·버튼 동작
+├── styles.css              반응형 ABB 스타일 UI
+├── schema.sql              비파괴 PostgreSQL 스키마
+├── .env.example            환경 변수 예시
+├── netlify.toml            project 폴더를 Base로 쓸 때의 설정
+└── render.yaml             project 폴더를 Root로 쓸 때의 설정
+```
+
+저장소 루트에도 `netlify.toml`과 `render.yaml`이 있으므로 저장소 전체를 그대로 연결해도 됩니다.
+
+## 로컬 실행
+
+```bash
+cd project
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+`.env`에서 최소 `DATABASE_URL`, `DATA_GO_KR_API_KEY`, `ADMIN_API_KEY`를 설정해야 합니다. 제공된 실제 `.env` 파일의 비밀값은 저장소에 커밋하지 마세요.
+
+뉴스 교차 검증과 신규 영업신호 수집은 `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`을 사용합니다. 키가 없으면 기존 프로젝트 검증에 한해 `GOOGLE_NEWS_VERIFY_ENABLED=true`일 때 Google News RSS를 보조 채널로 사용합니다. 뉴스 근거만으로 공식 계약을 확정하지 않으며, 공식 데이터와 뉴스가 함께 확인된 경우에만 `CROSS_VERIFIED`로 표시합니다.
+
+기존 `COLLECT_TASK_TIMEOUT_SECONDS`도 계속 인식하지만 신규 설정명은 `COLLECTOR_TIMEOUT_SECONDS`입니다.
+
+## 배포
+
+### Render
+
+1. 저장소 루트의 `render.yaml`로 Blueprint를 생성합니다.
+2. `DATABASE_URL`, 공공데이터 API 키를 Render Secret으로 입력합니다.
+3. 충분히 긴 임의 문자열을 `ADMIN_API_KEY`로 직접 설정하고 안전한 비밀 저장소에 보관합니다.
+4. `/health`가 `200`과 `database: connected`를 반환하는지 확인합니다.
+
+### Netlify
+
+저장소 루트 설정은 `project`를 Base/Publish 디렉터리로 사용하고 `/api/*`를 Render 서비스로 프록시합니다. Render 서비스 주소가 바뀌면 루트와 `project/netlify.toml`의 주소를 함께 변경하세요.
+
+대시보드에서 수집 또는 팔로업 저장을 처음 실행하면 관리자 키 입력창이 표시됩니다. 키는 현재 탭의 `sessionStorage`에만 저장됩니다.
+
+## RSS/기관 공고 채널
+
+쉼표로 여러 피드를 등록할 수 있습니다.
+
+```dotenv
+NEWS_RSS_FEEDS=해양뉴스|https://example.org/news.xml,조선뉴스|https://example.org/ship.rss
+PUBLIC_NOTICE_RSS_FEEDS=해경청|https://example.go.kr/notice.xml
+```
+
+제목과 요약에서 선박/건조/전동추진 키워드가 확인된 항목만 프로젝트로 저장됩니다.
+
+## 주요 API
+
+- `GET /api/projects`: 프로젝트 조회
+- `PUT /api/projects/{id}/followup`: 영업 팔로업 저장 (관리자)
+- `POST /api/projects/{id}/verify`: 공식·뉴스 근거 재검증 (관리자)
+- `POST /api/collect`: 기본 파이프라인 수집 (관리자)
+- `POST /api/collect/{alias}`: 단일 채널 수집 (관리자)
+- `GET /api/collect/status`: 수집 작업 상태
+- `GET /api/meta/apis`: 수집기/단계 메타데이터
+- `GET /health`: 앱·DB 상태
+
+관리자 API는 `X-Admin-Token` 헤더가 필요합니다.
+
+## 운영·배포 문서
+
+- `DEPLOYMENT_GUIDE_KO.md`: GitHub → Render → Netlify 교체, 중복 환경변수 오류, 자동수집, 롤백
+- `DATA_PIPELINE_GUIDE_KO.md`: 조달청 API 단계, P0~P3 판정, 검증 근거, 신규 프로젝트 탐색 범위
+
+`.github/workflows/collect-and-verify.yml`은 기본적으로 한국시간 03·09·15·21시에 전체 수집과 검증을 실행합니다.
